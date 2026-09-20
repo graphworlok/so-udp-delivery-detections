@@ -24,6 +24,11 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, "corpus.tsv")
 
+# Mirrors the pcre in SID 1000008 rev:2. Both the dropper form
+# "echo|nc <ip> <port> > a$$" and the wire form "&nc <ip> <port>|sh"
+# have to match; rev:1 anchored on "|nc" and missed the wire form.
+NC_RE = r"(^|[\s;&|`(])nc\s+(-\w+\s+)*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\s+\d{2,5}\b"
+
 
 def content_within(hay, first, second, within, nocase=True):
     """Suricata 'content:A; content:B; distance:0; within:N'.
@@ -69,9 +74,8 @@ RULES = [
          re.search(r"chmod\s+(\+x|[0-7]{3,4})\s", p, re.I))),
 
     (1000008, "Netcat Fetch", None,
-     lambda p: "|nc" in p.lower() and bool(
-         re.search(r"\|\s*nc\s+(-\w+\s+)*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\s+\d{2,5}\b",
-                   p, re.I))),
+     lambda p: "nc " in p.lower() and bool(
+         re.search(NC_RE, p, re.I))),
 
     (1000006, "Fetch Piped To Shell", None,
      lambda p: content_within(p, "http", "|sh", 256)),
