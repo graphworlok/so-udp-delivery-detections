@@ -268,9 +268,36 @@ across several rules, tuning changes, or rebuilding a grid from this repo.
 Clicking through thirteen rules once is fine; doing it after every edit is
 not.
 
-Any such tool should: validate with `so-udp-delivery test` first, default to a
-dry run, diff against what SOC already holds so unchanged rules are skipped,
-create with `PUT _doc/<uuid>?refresh=true` and update with
-`POST _update/<id>?refresh=true`, then verify by counting the SIDs in
-`/opt/so/rules/suricata/all-rulesets.rules` and checking `suricata.log` for a
-rule reload.
+### tools/push-soc.py
+
+That tool now exists. It validates nothing itself by design — run
+`so-udp-delivery test` first — and otherwise: dry run by default, diffs
+against what SOC already holds so unchanged rules are skipped, creates with
+`PUT _doc/<uuid>?refresh=true`, updates with `POST _update/<id>?refresh=true`,
+and copies the `userId` from an existing custom detection so ownership stays
+consistent.
+
+```bash
+# see what would change; writes nothing
+sudo python3 tools/push-soc.py rules/suricata/udp-delivery.rules
+
+#   CREATE  1000008  rev:2  LOCAL IOT-DELIVERY UDP Single-Packet Netcat Fetch
+#   UPDATE  1000005  rev:1 -> 2  LOCAL IOT-DELIVERY UDP ... Executable Bit
+#   same    1000001  rev:1
+#   ...
+
+# apply just the two that changed
+sudo python3 tools/push-soc.py rules/suricata/udp-delivery.rules     --sid 1000005 --sid 1000008 --confirm
+
+# then, after SOC recompiles
+sudo ./bin/so-udp-delivery verify
+```
+
+It is deliberately **not** wired into `bin/so-udp-delivery`. Everything the
+CLI does is either read-only or reversible from a backup; this is neither, so
+it stays a separate deliberate invocation rather than one subcommand among
+several.
+
+Rolling back a bad push means deleting the document by `_id` (visible in the
+create output) or fixing the rule and pushing again — there is no `.backups/`
+equivalent for the index.
