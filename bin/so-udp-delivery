@@ -152,22 +152,53 @@ cmd_check() {
         && ok "suricata binary present ($(suricata -V 2>/dev/null | head -1))" \
         || warn "suricata binary not in PATH - 'test' will use the docker container if available"
 
-    head1 "Detection install targets"
+    head1 "Which install route applies"
 
-    local rules_path sigma_dir
+    # Determined here, before anything is called "ok". A discovered path is a
+    # candidate, not a verdict - the verdict is whether Suricata loads it.
+    local rules_path sigma_dir file_route="unknown"
     if rules_path="$(discover_suricata_rules_path)"; then
-        if [[ -f "$rules_path" ]]; then
-            ok "Suricata local rules: $rules_path"
-            if grep -q "$MARKER_BEGIN" "$rules_path" 2>/dev/null; then
-                info "this repo's block is already installed there"
+        info "candidate local rules path: $rules_path"
+        [[ -f "$rules_path" ]] \
+            && grep -q "$MARKER_BEGIN" "$rules_path" 2>/dev/null \
+            && info "this repo's block is already installed there"
+    else
+        warn "no Suricata local-rules location found"
+        dim "probed: ${SURICATA_RULE_CANDIDATES[*]}"
+    fi
+
+    local syaml_early rulefiles rf
+    if syaml_early="$(discover_suricata_yaml)"; then
+        local defrulepath
+        defrulepath="$(grep -E '^\s*default-rule-path:' "$syaml_early" 2>/dev/null | head -1 | sed 's/^\s*//')" || true
+        [[ -n "$defrulepath" ]] && dim "$defrulepath"
+
+        rulefiles="$(awk '
+            /^[[:space:]]*rule-files:/ { flag=1; next }
+            flag && /^[[:space:]]*-[[:space:]]*/ { sub(/^[[:space:]]*-[[:space:]]*/,""); print; next }
+            flag { exit }
+        ' "$syaml_early" 2>/dev/null)" || true
+
+        if [[ -n "$rulefiles" ]]; then
+            info "suricata loads these rule files:"
+            while IFS= read -r rf; do [[ -n "$rf" ]] && dim "  $rf"; done <<< "$rulefiles"
+
+            if [[ -n "${rules_path:-}" ]] \
+                && printf '%s\n' "$rulefiles" | grep -qF "$(basename "$rules_path")"; then
+                file_route="ok"
+                ok "FILE ROUTE: $(basename "$rules_path") is loaded - install will work"
+            else
+                file_route="no"
+                warn "FILE ROUTE UNAVAILABLE: $(basename "$rules_path") is not loaded"
+                dim "writing rules there would have no effect and no error, so"
+                dim "'install' refuses it. This is normal on Security Onion 2.4+,"
+                dim "where SOC generates the rules file from the so-detection index."
+                ok "SOC ROUTE: use 'export-soc --format text' and SOC -> Detections"
             fi
         else
-            ok "Suricata local rules (will be created): $rules_path"
+            warn "no rule-files: block found in $syaml_early"
+            dim "cannot confirm whether a local rules file would be loaded."
         fi
-    else
-        fail "no Suricata local-rules location found"
-        dim "probed: ${SURICATA_RULE_CANDIDATES[*]}"
-        dim "if your grid uses a different path, pass --rules-path to install"
     fi
 
     if sigma_dir="$(discover_sigma_dir)"; then
@@ -183,40 +214,6 @@ cmd_check() {
     local syaml
     if syaml="$(discover_suricata_yaml)"; then
         ok "suricata.yaml: $syaml"
-
-        # THE decisive check. Discovering that a directory exists says nothing
-        # about whether Suricata reads a file we put there. On a grid where
-        # SOC generates the rules file from the so-detection index, a
-        # hand-written local.rules is silently ignored - the install appears
-        # to succeed and nothing ever fires.
-        local defrulepath rulefiles rf
-        defrulepath="$(grep -E '^\s*default-rule-path:' "$syaml" 2>/dev/null | head -1 | sed 's/^\s*//')" || true
-        [[ -n "$defrulepath" ]] && dim "$defrulepath"
-
-        rulefiles="$(awk '
-            /^[[:space:]]*rule-files:/ { flag=1; next }
-            flag && /^[[:space:]]*-[[:space:]]*/ { sub(/^[[:space:]]*-[[:space:]]*/,""); print; next }
-            flag { exit }
-        ' "$syaml" 2>/dev/null)" || true
-
-        if [[ -n "$rulefiles" ]]; then
-            info "suricata loads these rule files:"
-            while IFS= read -r rf; do [[ -n "$rf" ]] && dim "  $rf"; done <<< "$rulefiles"
-
-            if [[ -n "${rules_path:-}" ]] \
-                && printf '%s\n' "$rulefiles" | grep -qF "$(basename "$rules_path")"; then
-                ok "$(basename "$rules_path") IS in the loaded set - the file route works here"
-            else
-                fail "$(basename "$rules_path") is NOT in the set Suricata loads"
-                dim "writing rules there would have no effect and no error."
-                dim "use the SOC Detections route instead:"
-                dim "  so-udp-delivery export-soc    (or paste rules into SOC -> Detections)"
-                dim "'install' will refuse to write to an unloaded path."
-            fi
-        else
-            warn "no rule-files: block found in $syaml"
-            dim "cannot confirm the discovered path is actually loaded."
-        fi
 
         # HOME_NET must contain the monitored WAN address or every rule in
         # this set matches nothing at all.
@@ -351,8 +348,40 @@ cmd_check() {
     n_sigma="$(find "$SIGMA_DIR" -name '*.yml' 2>/dev/null | wc -l)"
     ok "$n_sigma Sigma rules in rules/sigma/"
 
-    printf '\n'
-    info "check is read-only. Next: 'so-udp-delivery test', then 'install --confirm'."
+    head1 "Next steps"
+
+    info "check is read-only - nothing above changed anything."
+    dim ""
+    dim "1. sudo so-udp-delivery test"
+    dim "   validates all 13 rules against a live Suricata parser. Do this"
+    dim "   first whichever route you take."
+    case "$file_route" in
+        ok)
+            dim "2. sudo so-udp-delivery install --confirm"
+            dim "3. sudo so-udp-delivery deploy --confirm"
+            dim "4. sudo so-udp-delivery verify"
+            ;;
+        no)
+            dim ""
+            dim "2. so-udp-delivery export-soc --format text"
+            dim "   then paste each rule into SOC -> Detections -> New Detection,"
+            dim "   language suricata, ruleset __custom__."
+            dim ""
+            dim "   Start with three rather than all thirteen:"
+            dim "     1000010  kit fingerprint - lowest false-positive risk"
+            dim "     1000001  generic wget    - highest expected hit rate"
+            dim "     1000020  Easydisc        - capture-derived offsets, needs a live test"
+            dim ""
+            dim "3. after a day: rule.name:LOCAL* | groupby rule.name"
+            dim "   then add the rest."
+            dim ""
+            warn "'install' will refuse on this grid - that is correct, not a fault."
+            ;;
+        *)
+            dim "2. route undetermined - check the rule-files output above before"
+            dim "   installing, or use the SOC route, which always works."
+            ;;
+    esac
 }
 
 # --- test ------------------------------------------------------------------
