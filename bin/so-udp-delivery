@@ -434,20 +434,46 @@ cmd_test() {
         outfile="$(mktemp)"
         so-suricata-testrule "$SURICATA_RULES" "$target" 2>&1 | tee "$outfile" || rc_native=$?
 
-        local loadline failed
+        local loadline failed dupes replaced real_failures
         loadline="$(grep -oE '[0-9]+ rules successfully loaded, [0-9]+ rules failed' "$outfile" | tail -1)" || true
+
+        # so-suricata-testrule appends our file to a COPY of
+        # all-rulesets.rules. Once these rules are deployed they are already
+        # in that copy, so every unchanged rule loads twice and Suricata
+        # rejects the second as a duplicate SID. Those are not failures -
+        # they mean "already live and unchanged". Only count the rest.
+        dupes="$(grep -c 'detect-parse: Duplicate signature' "$outfile" 2>/dev/null || true)"
+        replaced="$(grep -c 'Signature with newer revision' "$outfile" 2>/dev/null || true)"
+        : "${dupes:=0}" "${replaced:=0}"
 
         printf '\n'
         if [[ -n "$loadline" ]]; then
             failed="$(printf '%s' "$loadline" | grep -oE '[0-9]+ rules failed' | grep -oE '^[0-9]+')"
+            real_failures=$(( failed - dupes ))
+            (( real_failures < 0 )) && real_failures=0
+
             if [[ "$failed" -eq 0 ]]; then
                 ok "$loadline"
                 dim "all rules parsed, including ours, alongside the full production"
                 dim "ruleset - so no syntax errors and no SID collisions."
+            elif [[ "$real_failures" -eq 0 ]]; then
+                ok "$loadline"
+                ok "all $dupes 'failures' are duplicate SIDs - these rules are already deployed"
+                dim "so-suricata-testrule appends this file to a copy of the live"
+                dim "ruleset, so an already-deployed rule is loaded twice and the"
+                dim "second copy is rejected. That is expected, not a defect."
+                if [[ "$replaced" -gt 0 ]]; then
+                    ok "$replaced rule(s) carry a newer rev and cleanly replaced the deployed copy"
+                    dim "those are the ones with changes still to push."
+                fi
             else
                 fail "$loadline"
+                fail "$real_failures genuine failure(s), plus $dupes duplicate SID(s)"
+                dim "the duplicates are already-deployed rules and are expected."
+                dim "the genuine failures are not - look for error lines that do"
+                dim "NOT say 'Duplicate signature'."
                 rm -f "$outfile"; [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
-                die "rule validation failed - do not install until this passes"
+                die "rule validation failed - fix these before pushing"
             fi
         else
             warn "could not find a rule-loading summary in the output"
