@@ -140,10 +140,12 @@ to be noisy:
 Let those run for a day, check volume with `rule.name:LOCAL* | groupby
 rule.name`, then add the rest.
 
-### Do not write to so-detection directly
+### Writing to so-detection directly
 
-Detections are synced out by SOC. Writing documents straight into the index
-bypasses that and will not survive. Use the UI or the API behind it.
+Use the UI for a first install. Direct writes to the index are possible and
+are what Security Onion's own tooling does, but they skip the validation SOC
+runs on save — see the appendix at the end of this document for the mechanism,
+the exact document shape, and when it is worth the risk.
 
 ## Configuration these detections depend on
 
@@ -185,3 +187,90 @@ sudo ./bin/so-udp-delivery deploy --confirm
 
 Backups are in `.backups/` with UTC timestamps. The managed-block markers mean
 removal is exact — it does not rely on matching rule text.
+
+## Appendix: is a CLI push possible after all?
+
+Revisited 2026-09-21 with read access to the manager. Short answer: yes,
+mechanically — but it is not a supported interface, and the UI stays the safe
+path.
+
+### What the grid actually shows
+
+`so-detections-overrides-import`, which Security Onion ships, is the proof:
+
+```python
+AUTH_FILE = "/opt/so/conf/elasticsearch/curl.config"
+ES_URL    = "https://localhost:9200"
+
+def make_session(auth_file):
+    for line in open(auth_file):
+        if line.startswith("user ="):
+            creds = line.split("=", 1)[1].strip().replace('"', "")
+            user, _, password = creds.partition(":")
+            ...HTTPBasicAuth(user, password)
+
+r = session.get(f"{ES_URL}/{index}/_search", json=query)      # find
+r = session.post(f"{ES_URL}/{doc_index}/_update/{doc_id}", …) # change
+```
+
+So SO's own tooling reads basic-auth creds from `curl.config` and mutates
+`so-detection` over Elasticsearch REST. Writing to that index directly is
+therefore consistent with how the product operates — it is not a hack around
+SOC.
+
+The important limits:
+
+- That tool handles **overrides only** (suppress / threshold / modify on a
+  detection that already exists). Nothing shipped **creates** a detection.
+- `curl.config` is root-readable only, so any such tool needs `sudo`.
+- `so-*` has no other detection tooling: the full list contains
+  `so-detections-overrides-import` and `so-detections-runtime-status`, and the
+  latter only greps elastalert errors for Sigma.
+
+### The document to write
+
+Read back from a detection SOC created through the UI (SID 1000010), so this
+is SOC's own shape rather than a guess:
+
+| field | value |
+|---|---|
+| `_id` | a fresh UUID |
+| `so_detection.publicId` | the SID |
+| `so_detection.engine` / `.language` | `suricata` |
+| `so_detection.ruleset` | `__custom__` |
+| `so_detection.isCommunity` | `false` |
+| `so_detection.isEnabled` | `true` |
+| `so_detection.isReporting` | `false` |
+| `so_detection.content` | the full rule, one line |
+| `so_detection.severity` | `critical` if the rule carries `signature_severity Critical`, else `high` |
+| `so_detection.description` | SOC writes `Detection description not yet provided` |
+| `so_detection.license` | SOC writes `AGPL-3.0-only` |
+| `so_detection.sourceCreated` | midnight of the rule's `created_at` |
+| `so_detection.userId` | the Kratos user id SOC stamped; copy it from an existing custom detection |
+| `so_detection.overrides` | `[]` |
+| `so_detection.tags`, `.sourceUpdated` | `null` |
+
+Note there is **no** `so_detection.category` on a custom detection — SOC sets
+that only for community rulesets like ETOPEN. `export-soc` currently emits
+one, which is harmless but not faithful.
+
+### Why the UI is still the right default
+
+- A direct write bypasses the validation SOC runs when you save a rule. A bad
+  document lands in the datastore and, at worst, stops the ruleset compiling.
+- SOC's caching behaviour on externally-inserted documents is unverified. The
+  overrides tool implies SOC re-reads the index, but that is inference, not a
+  tested guarantee for *creation*.
+- The schema belongs to SOC and can change on upgrade.
+
+Where it earns its keep is **repeatability**, not first install: rev bumps
+across several rules, tuning changes, or rebuilding a grid from this repo.
+Clicking through thirteen rules once is fine; doing it after every edit is
+not.
+
+Any such tool should: validate with `so-udp-delivery test` first, default to a
+dry run, diff against what SOC already holds so unchanged rules are skipped,
+create with `PUT _doc/<uuid>?refresh=true` and update with
+`POST _update/<id>?refresh=true`, then verify by counting the SIDs in
+`/opt/so/rules/suricata/all-rulesets.rules` and checking `suricata.log` for a
+rule reload.
