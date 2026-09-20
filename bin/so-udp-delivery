@@ -728,11 +728,42 @@ cmd_import_pcap() {
 
 cmd_export_soc() {
     # Emit the rules as so-detection documents. This is the shape SOC stores
-    # custom detections in - confirmed against a live grid - and is the route
-    # to use when the file-based path is unavailable or when you would rather
-    # manage these through the Detections UI.
+    # custom detections in - confirmed against a live grid - and on Security
+    # Onion 2.4+ it is the ONLY route, because Suricata there loads a single
+    # SOC-generated file built from the so-detection index.
+    #
+    #   --format ndjson  (default)  one so-detection document per line
+    #   --format text               paste-friendly, one rule per block, for
+    #                               SOC -> Detections -> New Detection
     local author="${SUDO_USER:-${USER:-unknown}}"
     local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    if [[ "${OPT_FORMAT:-ndjson}" == "text" ]]; then
+        printf '# Paste each rule into SOC -> Detections -> New Detection.\n'
+        printf '# Language: suricata for the SIDs, sigma for the YAML blocks.\n'
+        printf '# Leave the ruleset as __custom__.\n\n'
+        local line sid msg
+        while IFS= read -r line; do
+            case "$line" in
+                alert\ *) ;;
+                *) continue ;;
+            esac
+            sid="$(printf '%s' "$line" | grep -oE '\bsid:[0-9]+' | cut -d: -f2)"
+            msg="$(printf '%s' "$line" | sed -n 's/.*msg:"\([^"]*\)".*/\1/p')"
+            printf '# ---- SID %s ----------------------------------------\n' "$sid"
+            printf '# %s\n' "$msg"
+            printf '%s\n\n' "$line"
+        done < "$SURICATA_RULES"
+
+        local f
+        for f in "$SIGMA_DIR"/*.yml; do
+            [[ -e "$f" ]] || continue
+            printf '# ---- sigma: %s ----------------------------------\n' "$(basename "$f")"
+            cat "$f"
+            printf '\n'
+        done
+        return 0
+    fi
 
     python3 - "$SURICATA_RULES" "$SIGMA_DIR" "$author" "$now" <<'PYEOF'
 import json, os, re, sys
@@ -827,8 +858,10 @@ COMMANDS
   configure              Print the pillar settings these detections depend on.
   verify                 Confirm the rules loaded, and whether they have fired.
   import-pcap <file>     Replay a captured datagram as a positive control.
-  export-soc             Emit the rules as so-detection NDJSON for the SOC
-                         Detections UI, when the file-based path is unavailable.
+  export-soc             Emit the rules for the SOC Detections UI. On SO 2.4+
+                         this is the only working route - Suricata there loads
+                         one SOC-generated file, not local.rules.
+                         --format text gives paste-friendly output.
   help                   This text.
 
 OPTIONS
@@ -855,6 +888,7 @@ HELPEOF
 
 OPT_RULES_PATH=""
 OPT_FORCE=0
+OPT_FORMAT="ndjson"
 CMD=""
 ARGS=()
 
@@ -862,6 +896,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --confirm)      CONFIRM=1; shift ;;
         --force)        OPT_FORCE=1; shift ;;
+        --format)       OPT_FORMAT="${2:-ndjson}"; shift 2 ;;
         --rules-path)   OPT_RULES_PATH="${2:-}"; shift 2 ;;
         -v|--verbose)   VERBOSE=1; shift ;;
         -h|--help)      cmd_help; exit 0 ;;

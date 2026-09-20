@@ -1,7 +1,23 @@
 # Deployment
 
-Two routes. Both end with the same detections on the grid; pick whichever
-matches how you already manage Security Onion.
+Two routes. **Which one applies is not a preference — it depends on your
+release, and `so-udp-delivery check` tells you which.**
+
+On Security Onion 2.4 and later, Suricata loads a single SOC-generated rules
+file built from the `so-detection` index. Confirmed on SO 3.3.0:
+
+```
+default-rule-path: /etc/suricata/rules
+rule-files:
+  - all-rulesets.rules
+```
+
+`local.rules` is not in that list, so writing one has **no effect and produces
+no error** — the install looks fine and nothing ever fires. On such a grid,
+Route B is the only route that works, and `install` refuses to run.
+
+Run `check` first. It parses `rule-files:` out of `suricata.yaml` and says
+directly whether the file route is viable.
 
 ## Step 0 — getting the files onto the manager
 
@@ -83,24 +99,51 @@ exists. `check` prints which one it chose. **If none is found, or the one it
 picked is wrong for your release, pass `--rules-path` explicitly** — do not let
 it guess. Same approach for the Sigma directory and `suricata.yaml`.
 
-## Route B — the SOC Detections UI
+## Route B — the SOC Detections UI (required on 2.4+)
 
-If you would rather manage these through SOC, or the file-based path is not
-available on your release:
+Custom detections live in the `so-detection` index and SOC compiles them into
+the rules file Suricata loads. That makes the UI the supported input, and on
+2.4+ the only one.
+
+**Paste-friendly output**, one rule per block with its SID and title:
+
+```bash
+./bin/so-udp-delivery export-soc --format text
+```
+
+For each block: **SOC → Detections → New Detection**, language `suricata` (or
+`sigma` for the YAML blocks), paste, leave the ruleset as `__custom__`, save.
+This is how the four existing custom Sigma detections on this grid were
+created.
+
+**Machine-readable output**, one `so-detection` document per line in the
+schema SOC stores them in (`ruleset: __custom__`, `isCommunity: false`,
+`publicId` = the SID for Suricata and the rule UUID for Sigma, `content` = the
+raw rule text):
 
 ```bash
 ./bin/so-udp-delivery export-soc > detections.ndjson
 ```
 
-This emits one `so-detection` document per rule, in the schema SOC actually
-stores custom detections in (`ruleset: __custom__`, `isCommunity: false`,
-`publicId` = the SID for Suricata and the rule UUID for Sigma, `content` = the
-raw rule text).
+### Do them in stages, not all thirteen
 
-You can also simply paste individual rules into **SOC → Detections → New
-Detection**, language `suricata` or `sigma`. That is the lowest-risk route for
-a first rule, and it is how the four existing custom Sigma detections on this
-grid were created.
+Pasting 13 rules in one sitting means 13 untested rules landing together. Start
+with three, in this order — they cover the most ground and are the least likely
+to be noisy:
+
+| SID | why first |
+|---|---|
+| `1000010` | kit fingerprint. Independent of payload and source, catches unknown vectors. Lowest false-positive risk in the set. |
+| `1000001` | the generic `wget` content rule. Highest expected hit rate. |
+| `1000020` | Easydisc. The one with capture-derived offsets, so it most needs a live test. |
+
+Let those run for a day, check volume with `rule.name:LOCAL* | groupby
+rule.name`, then add the rest.
+
+### Do not write to so-detection directly
+
+Detections are synced out by SOC. Writing documents straight into the index
+bypasses that and will not survive. Use the UI or the API behind it.
 
 ## Configuration these detections depend on
 
