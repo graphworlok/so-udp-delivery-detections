@@ -457,11 +457,68 @@ cmd_test() {
         # Did our rules actually fire? so-suricata-testrule writes eve output
         # under /tmp/nids-testing/output. Best-effort: absence proves nothing
         # if the layout differs, so this never fails the run.
+        # Parse the eve JSON properly. Grepping for the signature text also
+        # matches the escaped msg: inside each alert's "rule" field, which
+        # double-counts every hit and truncates it at the backslash.
         local evehits=""
-        evehits="$(grep -ho 'LOCAL IOT-DELIVERY[^"]*' /tmp/nids-testing/output/eve-*.json 2>/dev/null | sort -u)" || true
+        if compgen -G "/tmp/nids-testing/output/eve-*.json" >/dev/null 2>&1; then
+            evehits="$(python3 - "$selftest" /tmp/nids-testing/output/eve-*.json <<'PYEOF'
+import collections, json, sys
+
+selftest = sys.argv[1] == "1"
+hits, names = collections.Counter(), {}
+
+for path in sys.argv[2:]:
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        continue
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                doc = json.loads(line)
+            except ValueError:
+                continue
+            alert = doc.get("alert") or {}
+            sid, sig = alert.get("signature_id"), str(alert.get("signature", ""))
+            if sid and sig.startswith("LOCAL IOT-DELIVERY"):
+                hits[sid] += 1
+                names[sid] = sig
+
+for sid in sorted(hits):
+    print("%-8d %2dx  %s" % (sid, hits[sid], names[sid]))
+
+if selftest:
+    # What the crafted self-test capture is built to trip.
+    expected = {1000001, 1000005, 1000010, 1000011, 1000022, 1000023}
+    missing = expected - set(hits)
+    if missing:
+        print("MISSING:" + ",".join(str(s) for s in sorted(missing)))
+PYEOF
+)" || true
+        fi
+
         if [[ -n "$evehits" ]]; then
+            local missing=""
+            missing="$(printf '%s\n' "$evehits" | sed -n 's/^MISSING://p')"
             ok "rules fired on this capture:"
-            while IFS= read -r line; do [[ -n "$line" ]] && dim "  $line"; done <<< "$evehits"
+            while IFS= read -r line; do
+                [[ -n "$line" && "$line" != MISSING:* ]] && dim "  $line"
+            done <<< "$evehits"
+
+            if [[ $selftest -eq 1 ]]; then
+                if [[ -n "$missing" ]]; then
+                    warn "expected SIDs that did NOT fire: $missing"
+                    dim "note 1000010 is thresholded 1-per-source-per-600s, so on the"
+                    dim "self-test capture it fires on the first packet only - that one"
+                    dim "is expected and not a fault."
+                else
+                    ok "every SID the self-test capture targets fired"
+                fi
+            fi
         elif [[ $selftest -eq 1 ]]; then
             warn "no LOCAL IOT-DELIVERY alerts found in the test output"
             dim "the rules PARSE (see above) but did not match the self-test packets."

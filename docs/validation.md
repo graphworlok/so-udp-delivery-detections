@@ -32,8 +32,39 @@ sudo ./bin/so-udp-delivery test                      # syntax only
 sudo ./bin/so-udp-delivery test /tmp/delivery.pcap   # what fires
 ```
 
-In the output, confirm a `rules successfully loaded` line with zero failures,
-and no error lines naming SIDs in the `10000xx` range.
+`test` reads the verdict from Suricata's own rule-loading summary, not from
+the exit code — the exit code also covers the pcap stage, which can fail for
+reasons unrelated to the rules.
+
+## The self-test capture
+
+With no pcap argument, `test` generates one via `tools/make-selftest-pcap.py`:
+two crafted datagrams carrying the `0xd431` kit fingerprint (IP ID, DF clear,
+TTL 232, zero UDP checksum) and a `wget`/`chmod` one-liner, to UDP/9034 and
+UDP/9999. Nothing is transmitted; the URL is in TEST-NET-3.
+
+Confirmed on SO 3.3.0 / Suricata 8.0.6 — 9 alerts across 6 SIDs:
+
+| SID | 9034 | 9999 | note |
+|---|---|---|---|
+| `1000001` wget | ✓ | ✓ | |
+| `1000005` chmod +x | ✓ | ✓ | |
+| `1000010` kit fingerprint | ✓ | — | thresholded 1 per source per 600s, so the second packet is correctly suppressed |
+| `1000011` kit + downloader | ✓ | ✓ | |
+| `1000022` UDP/9999 | — | ✓ | |
+| `1000023` UDP/9034 | ✓ | — | |
+
+The destination is `192.168.1.10`, so it only matches where HOME_NET covers
+RFC1918. If the rules parse but nothing fires, that is the first thing to
+check:
+
+```bash
+python3 tools/make-selftest-pcap.py --dst <ip-inside-HOME_NET> /tmp/st.pcap
+sudo ./bin/so-udp-delivery test /tmp/st.pcap
+```
+
+**SID 1000020 (Easydisc) is not covered by the self-test** and remains the one
+unproven rule — see below.
 
 ## Positive control via so-import-pcap
 
