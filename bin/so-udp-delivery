@@ -1,0 +1,729 @@
+#!/usr/bin/env bash
+#
+# so-udp-delivery - configure, install and validate the single-packet UDP
+#                   delivery detections on a Security Onion grid.
+#
+# Runs on the SO manager. Every subcommand that writes anything is a dry run
+# unless --confirm is passed, and every write is backed up first.
+#
+# Usage:  so-udp-delivery <command> [options]
+# Run    so-udp-delivery help   for the command list.
+
+set -euo pipefail
+
+VERSION="1.0.0"
+MARKER_BEGIN="# BEGIN so-udp-delivery-detections"
+MARKER_END="# END so-udp-delivery-detections"
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SURICATA_RULES="${REPO_ROOT}/rules/suricata/udp-delivery.rules"
+SIGMA_DIR="${REPO_ROOT}/rules/sigma"
+BACKUP_DIR="${REPO_ROOT}/.backups"
+
+CONFIRM=0
+VERBOSE=0
+
+# Candidate locations, most-current first. Security Onion has moved these
+# between releases, so we probe rather than assume. `check` reports which
+# exist; nothing is written to a path that was not discovered.
+SURICATA_RULE_CANDIDATES=(
+    "/opt/so/saltstack/local/salt/idstools/rules/local.rules"
+    "/opt/so/saltstack/local/salt/idstools/local.rules"
+    "/opt/so/rules/nids/local.rules"
+    "/nsm/rules/local.rules"
+)
+SIGMA_DIR_CANDIDATES=(
+    "/opt/so/saltstack/local/salt/elastalert/rules"
+    "/opt/so/rules/elastalert/custom"
+    "/opt/so/conf/soc/sigma"
+)
+SURICATA_YAML_CANDIDATES=(
+    "/opt/so/conf/suricata/suricata.yaml"
+    "/etc/suricata/suricata.yaml"
+)
+PILLAR_CANDIDATES=(
+    "/opt/so/saltstack/local/pillar/global.sls"
+    "/opt/so/saltstack/local/pillar/minions"
+)
+
+# --- output helpers --------------------------------------------------------
+
+if [[ -t 1 ]]; then
+    C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YEL=$'\033[33m'
+    C_BLU=$'\033[34m'; C_DIM=$'\033[2m';  C_RST=$'\033[0m'
+else
+    C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_DIM=""; C_RST=""
+fi
+
+ok()    { printf '%s  ok  %s %s\n' "$C_GRN" "$C_RST" "$*"; }
+warn()  { printf '%s warn %s %s\n' "$C_YEL" "$C_RST" "$*"; }
+fail()  { printf '%s fail %s %s\n' "$C_RED" "$C_RST" "$*"; }
+info()  { printf '%s info %s %s\n' "$C_BLU" "$C_RST" "$*"; }
+dim()   { printf '%s      %s%s\n' "$C_DIM" "$*" "$C_RST"; }
+head1() { printf '\n%s== %s ==%s\n' "$C_BLU" "$*" "$C_RST"; }
+die()   { fail "$*"; exit 1; }
+
+dryrun_notice() {
+    if [[ $CONFIRM -eq 0 ]]; then
+        printf '\n%s DRY RUN - nothing was changed. Re-run with --confirm to apply.%s\n' \
+            "$C_YEL" "$C_RST"
+    fi
+}
+
+# --- discovery -------------------------------------------------------------
+
+discover_first_existing() {
+    # Print the first path in the argument list that exists.
+    local p
+    for p in "$@"; do
+        [[ -e "$p" ]] && { printf '%s\n' "$p"; return 0; }
+    done
+    return 1
+}
+
+discover_suricata_rules_path() {
+    # An existing local.rules file wins. Otherwise the first candidate whose
+    # PARENT directory exists - that is where SO expects local rules to go.
+    local p
+    for p in "${SURICATA_RULE_CANDIDATES[@]}"; do
+        [[ -f "$p" ]] && { printf '%s\n' "$p"; return 0; }
+    done
+    for p in "${SURICATA_RULE_CANDIDATES[@]}"; do
+        [[ -d "$(dirname "$p")" ]] && { printf '%s\n' "$p"; return 0; }
+    done
+    return 1
+}
+
+discover_sigma_dir() {
+    discover_first_existing "${SIGMA_DIR_CANDIDATES[@]}"
+}
+
+discover_suricata_yaml() {
+    discover_first_existing "${SURICATA_YAML_CANDIDATES[@]}"
+}
+
+so_version() {
+    if [[ -r /etc/soversion ]]; then
+        cat /etc/soversion
+    elif command -v so-status >/dev/null 2>&1; then
+        so-status --version 2>/dev/null | head -1
+    else
+        printf 'unknown\n'
+    fi
+}
+
+require_root() {
+    [[ "$(id -u)" -eq 0 ]] || die "must run as root (try: sudo $0 $*)"
+}
+
+# --- check -----------------------------------------------------------------
+
+cmd_check() {
+    head1 "Security Onion environment"
+
+    local ver; ver="$(so_version)"
+    if [[ "$ver" == "unknown" ]]; then
+        warn "Security Onion version could not be determined"
+        dim "this may not be an SO manager - most commands will not work here"
+    else
+        ok "Security Onion $ver"
+    fi
+
+    command -v salt-call >/dev/null 2>&1 \
+        && ok "salt-call present" \
+        || warn "salt-call not found - deploy will not be able to apply states"
+
+    command -v suricata >/dev/null 2>&1 \
+        && ok "suricata binary present ($(suricata -V 2>/dev/null | head -1))" \
+        || warn "suricata binary not in PATH - 'test' will use the docker container if available"
+
+    head1 "Detection install targets"
+
+    local rules_path sigma_dir
+    if rules_path="$(discover_suricata_rules_path)"; then
+        if [[ -f "$rules_path" ]]; then
+            ok "Suricata local rules: $rules_path"
+            if grep -q "$MARKER_BEGIN" "$rules_path" 2>/dev/null; then
+                info "this repo's block is already installed there"
+            fi
+        else
+            ok "Suricata local rules (will be created): $rules_path"
+        fi
+    else
+        fail "no Suricata local-rules location found"
+        dim "probed: ${SURICATA_RULE_CANDIDATES[*]}"
+        dim "if your grid uses a different path, pass --rules-path to install"
+    fi
+
+    if sigma_dir="$(discover_sigma_dir)"; then
+        ok "Sigma custom rules directory: $sigma_dir"
+    else
+        warn "no Sigma custom-rules directory found"
+        dim "probed: ${SIGMA_DIR_CANDIDATES[*]}"
+        dim "the SOC Detections UI is the alternative - see 'so-udp-delivery export-soc'"
+    fi
+
+    head1 "Configuration that affects whether these rules can fire"
+
+    local syaml
+    if syaml="$(discover_suricata_yaml)"; then
+        ok "suricata.yaml: $syaml"
+
+        # HOME_NET must contain the monitored WAN address or every rule in
+        # this set matches nothing at all.
+        local homenet
+        homenet="$(grep -E '^\s*HOME_NET:' "$syaml" 2>/dev/null | head -1 | sed 's/^\s*//')" || true
+        if [[ -n "$homenet" ]]; then
+            info "$homenet"
+            dim "these rules are '-> \$HOME_NET'. Confirm the monitored WAN IP is inside it."
+        else
+            warn "HOME_NET not found in $syaml (it may be set via pillar)"
+        fi
+
+        # Bad-checksum packets are skipped by default. Some of the traffic
+        # this repo targets carries malformed checksums deliberately.
+        local cksum
+        cksum="$(grep -E '^\s*checksum-validation:' "$syaml" 2>/dev/null | head -1 | sed 's/^\s*//')" || true
+        if [[ -n "$cksum" ]]; then
+            if printf '%s' "$cksum" | grep -qi 'none'; then
+                ok "$cksum"
+            else
+                warn "$cksum"
+                dim "packets with bad checksums may be skipped before rule evaluation."
+                dim "crafted delivery traffic sometimes has deliberately malformed checksums."
+                dim "see 'so-udp-delivery configure' for the pillar override."
+            fi
+        else
+            warn "checksum-validation not found in $syaml"
+        fi
+
+        # Without these, the alert reaches Elastic with no payload and no
+        # metadata - which defeats the entire point of the exercise.
+        if grep -qE '^\s*payload:\s*yes' "$syaml" 2>/dev/null; then
+            ok "eve alert output: payload: yes"
+        else
+            fail "eve alert output does not have 'payload: yes'"
+            dim "without it the datagram bytes never reach Elasticsearch."
+        fi
+
+        if grep -qE '^\s*payload-printable:\s*yes' "$syaml" 2>/dev/null; then
+            ok "eve alert output: payload-printable: yes"
+        else
+            warn "eve alert output does not have 'payload-printable: yes'"
+            dim "printable payload is what makes a one-liner readable in Hunt."
+        fi
+
+        if grep -qE '^\s*metadata:\s*yes' "$syaml" 2>/dev/null; then
+            ok "eve alert output: metadata: yes"
+        else
+            warn "eve alert output does not have 'metadata: yes'"
+            dim "without it, delivery_class / delivery_kit / vector never become"
+            dim "rule.metadata.* fields, and the whole classification scheme is"
+            dim "reduced to matching on rule names."
+        fi
+    else
+        warn "suricata.yaml not found"
+        dim "probed: ${SURICATA_YAML_CANDIDATES[*]}"
+    fi
+
+    head1 "Repo contents"
+    if [[ -f "$SURICATA_RULES" ]]; then
+        ok "$(grep -c '^alert' "$SURICATA_RULES") Suricata rules in $(basename "$SURICATA_RULES")"
+    else
+        fail "missing $SURICATA_RULES"
+    fi
+    local n_sigma
+    n_sigma="$(find "$SIGMA_DIR" -name '*.yml' 2>/dev/null | wc -l)"
+    ok "$n_sigma Sigma rules in rules/sigma/"
+
+    printf '\n'
+    info "check is read-only. Next: 'so-udp-delivery test', then 'install --confirm'."
+}
+
+# --- test ------------------------------------------------------------------
+
+cmd_test() {
+    head1 "Suricata rule syntax"
+
+    [[ -f "$SURICATA_RULES" ]] || die "missing $SURICATA_RULES"
+
+    local syaml suri_cmd
+    syaml="$(discover_suricata_yaml || true)"
+
+    if command -v suricata >/dev/null 2>&1; then
+        suri_cmd="suricata"
+    elif command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^so-suricata$'; then
+        info "using the so-suricata container"
+        suri_cmd="docker exec so-suricata suricata"
+    else
+        die "no suricata binary and no so-suricata container - cannot validate syntax"
+    fi
+
+    local args=(-T -S "$SURICATA_RULES")
+    [[ -n "$syaml" ]] && args=(-T -c "$syaml" -S "$SURICATA_RULES")
+
+    info "running: $suri_cmd ${args[*]}"
+    if $suri_cmd "${args[@]}"; then
+        ok "rules parse cleanly"
+    else
+        die "rule validation failed - do not install until this passes"
+    fi
+
+    head1 "Sigma rule syntax"
+    local f rc=0
+    for f in "$SIGMA_DIR"/*.yml; do
+        [[ -e "$f" ]] || continue
+        if command -v python3 >/dev/null 2>&1; then
+            if python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" "$f" 2>/dev/null; then
+                ok "$(basename "$f")"
+            else
+                fail "$(basename "$f") - YAML does not parse"; rc=1
+            fi
+        else
+            warn "python3 not available, skipping YAML validation"
+            break
+        fi
+    done
+    [[ $rc -eq 0 ]] || die "fix the Sigma rules before installing"
+}
+
+# --- install ---------------------------------------------------------------
+
+backup_file() {
+    local src="$1"
+    [[ -f "$src" ]] || return 0
+    mkdir -p "$BACKUP_DIR"
+    local dest="${BACKUP_DIR}/$(basename "$src").$(date +%Y%m%dT%H%M%SZ).bak"
+    if [[ $CONFIRM -eq 1 ]]; then
+        cp -p "$src" "$dest"
+        info "backed up $src -> $dest"
+    else
+        dim "would back up $src -> $dest"
+    fi
+}
+
+strip_marker_block() {
+    # Remove any previously installed block from stdin.
+    sed "/^${MARKER_BEGIN}/,/^${MARKER_END}/d"
+}
+
+cmd_install() {
+    require_root install
+
+    local rules_path="${OPT_RULES_PATH:-}"
+    if [[ -z "$rules_path" ]]; then
+        rules_path="$(discover_suricata_rules_path)" \
+            || die "no Suricata local-rules location found; pass --rules-path"
+    fi
+
+    head1 "Installing Suricata rules"
+    info "target: $rules_path"
+
+    [[ -f "$SURICATA_RULES" ]] || die "missing $SURICATA_RULES"
+
+    backup_file "$rules_path"
+
+    local tmp; tmp="$(mktemp)"
+    if [[ -f "$rules_path" ]]; then
+        strip_marker_block < "$rules_path" > "$tmp"
+    else
+        : > "$tmp"
+    fi
+    {
+        printf '%s v%s (installed %s)\n' "$MARKER_BEGIN" "$VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '# Managed block. Edits here are overwritten on reinstall.\n'
+        printf '# Source: https://github.com/graphworlok/so-udp-delivery-detections\n'
+        cat "$SURICATA_RULES"
+        printf '%s\n' "$MARKER_END"
+    } >> "$tmp"
+
+    local n; n="$(grep -c '^alert' "$SURICATA_RULES")"
+    if [[ $CONFIRM -eq 1 ]]; then
+        cat "$tmp" > "$rules_path"
+        ok "wrote $n rules to $rules_path"
+    else
+        dim "would write $n rules to $rules_path"
+        dim "SIDs: $(grep -oE 'sid:[0-9]+' "$SURICATA_RULES" | cut -d: -f2 | tr '\n' ' ')"
+    fi
+    rm -f "$tmp"
+
+    head1 "Installing Sigma rules"
+    local sigma_dir
+    if sigma_dir="$(discover_sigma_dir)"; then
+        local f
+        for f in "$SIGMA_DIR"/*.yml; do
+            [[ -e "$f" ]] || continue
+            local dest="${sigma_dir}/$(basename "$f")"
+            backup_file "$dest"
+            if [[ $CONFIRM -eq 1 ]]; then
+                cp "$f" "$dest"
+                ok "installed $(basename "$f")"
+            else
+                dim "would install $(basename "$f") -> $dest"
+            fi
+        done
+    else
+        warn "no Sigma directory found - skipping"
+        dim "use 'so-udp-delivery export-soc' and import via the SOC Detections UI instead"
+    fi
+
+    dryrun_notice
+    [[ $CONFIRM -eq 1 ]] && info "now run: so-udp-delivery deploy --confirm"
+    return 0
+}
+
+# --- remove ----------------------------------------------------------------
+
+cmd_remove() {
+    require_root remove
+
+    local rules_path="${OPT_RULES_PATH:-}"
+    [[ -n "$rules_path" ]] || rules_path="$(discover_suricata_rules_path)" \
+        || die "no Suricata local-rules location found"
+
+    head1 "Removing managed block"
+    if [[ ! -f "$rules_path" ]]; then
+        warn "$rules_path does not exist - nothing to remove"
+        return 0
+    fi
+    if ! grep -q "$MARKER_BEGIN" "$rules_path"; then
+        warn "no managed block in $rules_path - nothing to remove"
+        return 0
+    fi
+
+    backup_file "$rules_path"
+    if [[ $CONFIRM -eq 1 ]]; then
+        local tmp; tmp="$(mktemp)"
+        strip_marker_block < "$rules_path" > "$tmp"
+        cat "$tmp" > "$rules_path"
+        rm -f "$tmp"
+        ok "removed managed block from $rules_path"
+    else
+        dim "would remove the managed block from $rules_path"
+    fi
+
+    local sigma_dir f
+    if sigma_dir="$(discover_sigma_dir)"; then
+        for f in "$SIGMA_DIR"/*.yml; do
+            [[ -e "$f" ]] || continue
+            local dest="${sigma_dir}/$(basename "$f")"
+            [[ -f "$dest" ]] || continue
+            if [[ $CONFIRM -eq 1 ]]; then
+                rm -f "$dest"; ok "removed $(basename "$f")"
+            else
+                dim "would remove $dest"
+            fi
+        done
+    fi
+
+    dryrun_notice
+    [[ $CONFIRM -eq 1 ]] && info "now run: so-udp-delivery deploy --confirm"
+    return 0
+}
+
+# --- deploy ----------------------------------------------------------------
+
+cmd_deploy() {
+    require_root deploy
+
+    head1 "Applying configuration"
+
+    if [[ $CONFIRM -eq 0 ]]; then
+        dim "would run: salt-call state.apply idstools"
+        dim "would run: salt-call state.apply suricata"
+        dim "would run: so-suricata-restart"
+        dim "would run: so-elastalert-restart  (if Sigma rules were installed)"
+        dryrun_notice
+        return 0
+    fi
+
+    command -v salt-call >/dev/null 2>&1 || die "salt-call not found"
+
+    info "salt-call state.apply idstools"
+    salt-call state.apply idstools || warn "idstools state returned non-zero"
+
+    info "salt-call state.apply suricata"
+    salt-call state.apply suricata || warn "suricata state returned non-zero"
+
+    if command -v so-suricata-restart >/dev/null 2>&1; then
+        info "so-suricata-restart"
+        so-suricata-restart || warn "suricata restart returned non-zero"
+    fi
+
+    if command -v so-elastalert-restart >/dev/null 2>&1; then
+        info "so-elastalert-restart"
+        so-elastalert-restart || warn "elastalert restart returned non-zero"
+    fi
+
+    ok "deploy complete"
+    info "confirm the rules loaded: so-udp-delivery verify"
+}
+
+# --- configure -------------------------------------------------------------
+
+cmd_configure() {
+    head1 "Pillar settings these detections depend on"
+
+    cat <<'PILLAREOF'
+Add to /opt/so/saltstack/local/pillar/global.sls (or the relevant minion
+pillar), then re-run: so-udp-delivery deploy --confirm
+
+  suricata:
+    config:
+      # Evaluate rules against packets with bad checksums. Crafted delivery
+      # traffic sometimes carries deliberately malformed checksums, and the
+      # default behaviour silently skips exactly the packets you want.
+      stream:
+        checksum-validation: none
+
+      outputs:
+        - eve-log:
+            types:
+              - alert:
+                  # payload      - the datagram bytes reach Elasticsearch,
+                  #                which is the whole point: for single-packet
+                  #                UDP the alert IS the capture.
+                  # metadata     - delivery_class / delivery_kit / vector
+                  #                become rule.metadata.* and therefore
+                  #                pivotable in Hunt.
+                  payload: yes
+                  payload-printable: yes
+                  packet: yes
+                  metadata: yes
+
+Also confirm HOME_NET contains the monitored WAN address. Every rule in this
+set is written '-> $HOME_NET'; if the WAN IP is outside it, nothing fires and
+the failure is silent.
+
+  # check the running value:
+  so-udp-delivery check
+PILLAREOF
+
+    printf '\n'
+    info "configure only prints - it does not edit pillar files."
+    dim "pillar edits are hand-applied deliberately; they affect the whole grid."
+}
+
+# --- verify ----------------------------------------------------------------
+
+cmd_verify() {
+    head1 "Are the rules loaded?"
+
+    local rules_path
+    if rules_path="$(discover_suricata_rules_path)" && [[ -f "$rules_path" ]]; then
+        if grep -q "$MARKER_BEGIN" "$rules_path"; then
+            ok "managed block present in $rules_path"
+        else
+            fail "managed block NOT present in $rules_path"
+        fi
+    fi
+
+    if [[ -r /opt/so/log/suricata/suricata.log ]]; then
+        local loaded
+        loaded="$(grep -oE '[0-9]+ rules successfully loaded' /opt/so/log/suricata/suricata.log 2>/dev/null | tail -1)" || true
+        [[ -n "$loaded" ]] && info "suricata.log: $loaded"
+        if grep -qiE 'error.*(1000[0-9]{3})' /opt/so/log/suricata/suricata.log 2>/dev/null; then
+            fail "suricata.log mentions errors against SIDs in our block:"
+            grep -iE 'error.*(1000[0-9]{3})' /opt/so/log/suricata/suricata.log | tail -5
+        fi
+    fi
+
+    head1 "Have they fired?"
+
+    if command -v so-elasticsearch-query >/dev/null 2>&1; then
+        local q='{"size":0,"query":{"bool":{"filter":[{"prefix":{"rule.name":"LOCAL IOT-DELIVERY"}},{"range":{"@timestamp":{"gte":"now-7d"}}}]}},"aggs":{"by_rule":{"terms":{"field":"rule.name","size":25}}}}'
+        so-elasticsearch-query "*:logs-suricata.alerts-so/_search" -d "$q" 2>/dev/null \
+            || warn "elasticsearch query failed"
+    else
+        warn "so-elasticsearch-query not available"
+        dim "run this in Hunt instead, over the last 7 days:"
+        dim '  rule.name:LOCAL* | groupby rule.name'
+        dim "and to confirm the metadata pivot survived ingest:"
+        dim '  rule.metadata.delivery_class:single_packet_udp | groupby rule.metadata.vector'
+    fi
+}
+
+# --- import-pcap -----------------------------------------------------------
+
+cmd_import_pcap() {
+    local pcap="${1:-}"
+    [[ -n "$pcap" ]] || die "usage: so-udp-delivery import-pcap <file.pcap>"
+    [[ -f "$pcap" ]] || die "no such file: $pcap"
+
+    command -v so-import-pcap >/dev/null 2>&1 || die "so-import-pcap not found"
+
+    head1 "Replaying $pcap through Suricata and Zeek"
+    info "this is the positive control: a known-good captured datagram should"
+    info "produce a LOCAL IOT-DELIVERY alert with the payload attached."
+
+    if [[ $CONFIRM -eq 0 ]]; then
+        dim "would run: so-import-pcap $pcap"
+        dryrun_notice
+        return 0
+    fi
+
+    so-import-pcap "$pcap"
+    printf '\n'
+    info "so-import-pcap prints a Hunt URL scoped to the import's timestamps."
+    info "Open it and confirm the expected SID fired. Imported events keep the"
+    info "pcap's original timestamps, so search that range, not 'now'."
+}
+
+# --- export-soc ------------------------------------------------------------
+
+cmd_export_soc() {
+    # Emit the rules as so-detection documents. This is the shape SOC stores
+    # custom detections in - confirmed against a live grid - and is the route
+    # to use when the file-based path is unavailable or when you would rather
+    # manage these through the Detections UI.
+    local author="${SUDO_USER:-${USER:-unknown}}"
+    local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    python3 - "$SURICATA_RULES" "$SIGMA_DIR" "$author" "$now" <<'PYEOF'
+import json, os, re, sys
+
+rules_file, sigma_dir, author, now = sys.argv[1:5]
+
+def emit(doc):
+    print(json.dumps(doc, separators=(",", ":")))
+
+with open(rules_file, "r", encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line.startswith("alert "):
+            continue
+        sid = re.search(r"\bsid:(\d+)", line)
+        msg = re.search(r'\bmsg:"([^"]+)"', line)
+        if not (sid and msg):
+            continue
+        title = msg.group(1)
+        # SOC derives category from the leading tokens of msg.
+        category = " ".join(title.split()[:2])
+        emit({
+            "so_kind": "detection",
+            "so_detection.publicId": sid.group(1),
+            "so_detection.title": title,
+            "so_detection.category": category,
+            "so_detection.severity": "high" if "Critical" in line else "medium",
+            "so_detection.author": author,
+            "so_detection.description": "",
+            "so_detection.content": line,
+            "so_detection.isEnabled": True,
+            "so_detection.isReporting": False,
+            "so_detection.isCommunity": False,
+            "so_detection.engine": "suricata",
+            "so_detection.language": "suricata",
+            "so_detection.ruleset": "__custom__",
+            "so_detection.license": "BSD-3-Clause",
+            "so_detection.createTime": now,
+        })
+
+for name in sorted(os.listdir(sigma_dir)):
+    if not name.endswith((".yml", ".yaml")):
+        continue
+    path = os.path.join(sigma_dir, name)
+    with open(path, "r", encoding="utf-8") as fh:
+        content = fh.read()
+    rid = re.search(r"^id:\s*(\S+)", content, re.M)
+    title = re.search(r"^title:\s*(.+)$", content, re.M)
+    level = re.search(r"^level:\s*(\S+)", content, re.M)
+    if not (rid and title):
+        sys.stderr.write("skipping %s: no id/title\n" % name)
+        continue
+    emit({
+        "so_kind": "detection",
+        "so_detection.publicId": rid.group(1),
+        "so_detection.title": title.group(1).strip(),
+        "so_detection.category": "network",
+        "so_detection.severity": (level.group(1) if level else "medium"),
+        "so_detection.author": author,
+        "so_detection.description": "",
+        "so_detection.content": content,
+        "so_detection.isEnabled": True,
+        "so_detection.isReporting": False,
+        "so_detection.isCommunity": False,
+        "so_detection.engine": "elastalert",
+        "so_detection.language": "sigma",
+        "so_detection.ruleset": "__custom__",
+        "so_detection.license": "BSD-3-Clause",
+        "so_detection.product": "zeek",
+        "so_detection.createTime": now,
+    })
+PYEOF
+}
+
+# --- help ------------------------------------------------------------------
+
+cmd_help() {
+    cat <<HELPEOF
+so-udp-delivery v${VERSION}
+
+Configure, install and validate single-packet UDP delivery detections on a
+Security Onion grid.
+
+COMMANDS
+  check                  Read-only survey: SO version, install targets, and the
+                         configuration settings that decide whether these rules
+                         can fire at all. Start here. (default)
+  test                   Validate rule syntax with suricata -T. Run before install.
+  install                Install the rules into the grid's local rules location.
+  remove                 Remove the managed block and the installed Sigma rules.
+  deploy                 Apply salt states and restart Suricata / ElastAlert.
+  configure              Print the pillar settings these detections depend on.
+  verify                 Confirm the rules loaded, and whether they have fired.
+  import-pcap <file>     Replay a captured datagram as a positive control.
+  export-soc             Emit the rules as so-detection NDJSON for the SOC
+                         Detections UI, when the file-based path is unavailable.
+  help                   This text.
+
+OPTIONS
+  --confirm              Actually make changes. Without it, every mutating
+                         command is a dry run that prints what it would do.
+  --rules-path <path>    Override the discovered local.rules location.
+  -v, --verbose          More detail.
+
+TYPICAL FIRST RUN
+  sudo so-udp-delivery check
+  sudo so-udp-delivery test
+  sudo so-udp-delivery install --confirm
+  sudo so-udp-delivery deploy  --confirm
+  sudo so-udp-delivery verify
+
+Rules are installed inside a marked block, so reinstalling replaces cleanly
+and 'remove' restores the file. Every write is backed up to .backups/ first.
+HELPEOF
+}
+
+# --- argument parsing ------------------------------------------------------
+
+OPT_RULES_PATH=""
+CMD=""
+ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --confirm)      CONFIRM=1; shift ;;
+        --rules-path)   OPT_RULES_PATH="${2:-}"; shift 2 ;;
+        -v|--verbose)   VERBOSE=1; shift ;;
+        -h|--help)      cmd_help; exit 0 ;;
+        --version)      printf '%s\n' "$VERSION"; exit 0 ;;
+        -*)             die "unknown option: $1" ;;
+        *)              if [[ -z "$CMD" ]]; then CMD="$1"; else ARGS+=("$1"); fi; shift ;;
+    esac
+done
+
+[[ $VERBOSE -eq 1 ]] && set -x
+
+case "${CMD:-check}" in
+    check)        cmd_check ;;
+    test)         cmd_test ;;
+    install)      cmd_install ;;
+    remove)       cmd_remove ;;
+    deploy)       cmd_deploy ;;
+    configure)    cmd_configure ;;
+    verify)       cmd_verify ;;
+    import-pcap)  cmd_import_pcap "${ARGS[@]:-}" ;;
+    export-soc)   cmd_export_soc ;;
+    help)         cmd_help ;;
+    *)            die "unknown command: $CMD (try: so-udp-delivery help)" ;;
+esac

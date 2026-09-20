@@ -1,0 +1,57 @@
+title: UDP Exploit Delivery Classified Only By Source Reputation
+id: 02f8b69f-ada3-4f85-8e24-faa8fad9ddc4
+status: experimental
+description: |
+    A UDP datagram whose payload carries a downloader verb, but where the
+    alert that fired - and therefore the classification, the severity and the
+    analyst-facing name - came from a source-reputation rule (ET DROP, ET
+    CINS, ET COMPROMISED) rather than from anything about the content.
+
+    This is a measurement rule, not a protection rule. It is how you size the
+    blind spot: every hit is a delivery that would have been invisible had the
+    source been clean. Once the Suricata content rules in this repo are
+    deployed, the count here should fall toward zero - not because the traffic
+    stopped, but because it is being classified on what it is instead of on
+    who sent it. A persistent non-zero count means a content rule is missing.
+
+    VERIFY BEFORE ENABLING: this rule reads the stored packet payload, which
+    exists only on documents where some rule already alerted, and the field
+    name varies by grid and Suricata eve configuration. Confirm that
+    network.data.decoded exists and is searchable on this grid first:
+      so_list_fields index=logs-suricata.alerts-so pattern=*data*
+    If your grid stores it elsewhere, adjust the selection field below.
+references:
+    - https://github.com/graphworlok/so-udp-delivery-detections
+author: orlock@crypt.net.au
+date: 2026-09-20
+logsource:
+    category: network
+    product: suricata
+detection:
+    selection_transport:
+        event.dataset: alert
+        network.transport: udp
+    selection_reputation_rule:
+        rule.name|startswith:
+            - 'ET DROP'
+            - 'ET CINS'
+            - 'ET COMPROMISED'
+    selection_downloader_payload:
+        network.data.decoded|contains:
+            - 'wget'
+            - 'tftp'
+            - 'busybox'
+            - 'chmod +x'
+    filter_already_classified:
+        rule.name|startswith: 'LOCAL IOT-DELIVERY'
+    condition: selection_transport and selection_reputation_rule and selection_downloader_payload and not filter_already_classified
+fields:
+    - source.ip
+    - destination.ip
+    - destination.port
+    - rule.name
+    - network.data.decoded
+falsepositives:
+    - None expected. A reputation-listed source sending a downloader verb over
+      UDP to an unsolicited destination is the thing this repo exists to find.
+level: high

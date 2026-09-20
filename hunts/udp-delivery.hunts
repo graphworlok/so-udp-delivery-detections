@@ -1,0 +1,63 @@
+# Hunt queries for single-packet UDP exploit delivery.
+#
+# Elasticsearch query_string (Lucene) syntax, as used by SOC Hunt and by the
+# securityonion MCP tools. Lines starting with # are comments.
+#
+# Field names verified against a live SO 3.2 grid: zeek datasets are fully
+# qualified (zeek.conn, not conn); source.packets / destination.packets exist
+# on zeek.conn as longs.
+
+# --- post-deployment: what the local rules caught ---------------------------
+
+# Everything these detections consider a single-packet UDP delivery.
+rule.metadata.delivery_class:single_packet_udp
+
+# Broken down by targeted service.
+rule.metadata.delivery_class:single_packet_udp | groupby rule.metadata.vector
+
+# The raw-socket kit, across every vector it was used against.
+rule.metadata.delivery_kit:d431 | groupby source.ip, destination.port
+
+# Highest-confidence hits only: kit fingerprint AND downloader payload.
+rule.name:"LOCAL IOT-DELIVERY UDP Raw-Socket Kit Delivering Downloader Payload"
+
+# All local work, isolated from ETOPEN.
+rule.name:LOCAL* | groupby rule.name
+
+# --- bias measurement -------------------------------------------------------
+
+# Deliveries classified ONLY by source reputation. Before the content rules
+# this was the entire non-Realtek population. Afterwards it should approach
+# zero; a persistent count means a content rule is missing for that shape.
+event.dataset:alert AND network.transport:udp AND rule.name:(ET\ DROP* OR ET\ CINS* OR ET\ COMPROMISED*) AND NOT rule.name:LOCAL*
+
+# Same, narrowed to packets whose stored payload carries a downloader verb.
+# Requires network.data.decoded to exist and be searchable - verify first with
+# so_list_fields on logs-suricata.alerts-so.
+event.dataset:alert AND network.transport:udp AND network.data.decoded:(wget OR tftp OR busybox) AND NOT rule.name:LOCAL*
+
+# --- rule-independent, payload-free ------------------------------------------
+
+# Single unanswered inbound UDP datagram to a known vector port. Works with no
+# Suricata rule at all, because Zeek logs the conn row regardless. No payload.
+event.dataset:zeek.conn AND network.transport:udp AND destination.port:(500 OR 9034 OR 9999 OR 37215 OR 43561 OR 43562 OR 52869) AND source.packets:1 AND destination.packets:0
+
+# The interesting case: a conn row on a vector port with no corresponding
+# alert in the same window. Run the query above, then check each source.ip
+# against rule.name:LOCAL*. A hit here with no alert means a vector arrived
+# that no content rule covers.
+
+# Unanswered inbound UDP to ANY port, single packet, from a source that has
+# never been seen before. Widest form - noisy, but this is how a genuinely new
+# vector port first shows up.
+event.dataset:zeek.conn AND network.transport:udp AND source.packets:1 AND destination.packets:0 AND NOT destination.port:(53 OR 123 OR 443 OR 3478 OR 5353) | groupby destination.port
+
+# --- pivots ------------------------------------------------------------------
+
+# Everything a delivery source did, any protocol, any port. This is the
+# propagation-profile query: port sets differ per family and are a usable
+# fingerprint even without payload.
+source.ip:"REPLACE_ME" | groupby event.dataset, destination.port
+
+# Did the delivery source later come back over TCP?
+source.ip:"REPLACE_ME" AND network.transport:tcp | groupby destination.port

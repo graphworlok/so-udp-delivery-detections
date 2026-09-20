@@ -1,0 +1,57 @@
+title: Single-Packet Unanswered Inbound UDP To IoT Exploit Vector Port
+id: 4cb0c240-0eca-46c7-bc2c-3d3d6d766cb8
+status: experimental
+description: |
+    Inbound UDP to a known single-packet exploit vector port, where the sensor
+    saw exactly one packet in and nothing back.
+
+    This is the metadata half of single-packet UDP delivery detection. It
+    carries no payload - Zeek logs the conn row but not the datagram bytes -
+    but it does not depend on a Suricata rule having fired, so it timestamps
+    the attempt and gives a source to pivot on even when no content rule
+    matched and the source is not on any reputation list.
+
+    Pair it with the Suricata rules in this repo (SID 1000000-1000999), which
+    supply the payload for the same events. A hit here with no corresponding
+    LOCAL IOT-DELIVERY alert means a vector arrived that no content rule
+    covers - which is the interesting case.
+references:
+    - https://github.com/graphworlok/so-udp-delivery-detections
+author: orlock@crypt.net.au
+date: 2026-09-20
+logsource:
+    category: network
+    product: zeek
+detection:
+    selection:
+        event.dataset: zeek.conn
+        network.transport: udp
+        destination.port:
+            - 500
+            - 5353
+            - 9034
+            - 9999
+            - 37215
+            - 43561
+            - 43562
+            - 52869
+    unanswered_single_packet:
+        source.packets: 1
+        destination.packets: 0
+    condition: selection and unanswered_single_packet
+fields:
+    - source.ip
+    - destination.ip
+    - destination.port
+    - network.bytes
+falsepositives:
+    - Internet background radiation and research scanners, which also send a
+      single unanswered datagram. Volume from a given source is the
+      discriminator - delivery is usually one or a few packets per source,
+      scanning is sustained.
+    - UDP/500 receives legitimate unsolicited IKE from misconfigured VPN
+      peers. Remove 500 from the list if the local environment terminates IKE.
+    - UDP/5353 (mDNS) is included only because it is a commonly probed
+      discovery port. Remove it if any local segment is bridged to the
+      sensor's view.
+level: medium

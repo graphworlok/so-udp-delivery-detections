@@ -1,0 +1,9 @@
+# These are checked out onto a Linux Security Onion manager and executed
+# there. CRLF line endings would produce "bad interpreter: /usr/bin/env
+# bash\r" and break the rules parser, so force LF regardless of the
+# platform they were authored on.
+*.sh        text eol=lf
+*.rules     text eol=lf
+*.yml       text eol=lf
+*.hunts     text eol=lf
+bin/*       text eol=lf

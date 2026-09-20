@@ -1,0 +1,6 @@
+.backups/
+*.pcap
+*.bak
+__pycache__/
+*.pyc
+detections.ndjson
