@@ -407,37 +407,75 @@ cmd_test() {
     #    Suricata still loads and parses every rule, then processes zero
     #    packets, so rule errors surface exactly the same way.
     if command -v so-suricata-testrule >/dev/null 2>&1; then
-        local target="$pcap" tmpdir=""
+        local target="$pcap" tmpdir="" selftest=0
         if [[ -z "$target" ]]; then
             tmpdir="$(mktemp -d)"
-            target="${tmpdir}/empty.pcap"
-            # 24-byte libpcap file header, no packets: LE magic, v2.4,
-            # snaplen 65535, linktype 1 (Ethernet).
-            printf '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00' > "$target"
-            info "syntax-only check against an empty pcap"
-            dim "to see which rules actually FIRE, pass a real capture:"
-            dim "  so-udp-delivery test /path/to/delivery.pcap"
+            target="${tmpdir}/selftest.pcap"
+            selftest=1
+            if ! python3 "${REPO_ROOT}/tools/make-selftest-pcap.py" "$target" 2>/dev/null; then
+                die "could not generate the self-test pcap (needs python3)"
+            fi
+            info "no pcap given - generated a self-test capture"
+            dim "two crafted datagrams carrying the 0xd431 kit fingerprint and a"
+            dim "wget one-liner, to UDP/9034 and UDP/9999. Nothing is sent anywhere."
+            dim "to test a real capture: so-udp-delivery test /path/to/file.pcap"
         else
             [[ -f "$target" ]] || die "no such pcap: $target"
             info "running the rules against $target"
         fi
 
         info "so-suricata-testrule $SURICATA_RULES $target"
-        local rc_native=0
-        so-suricata-testrule "$SURICATA_RULES" "$target" || rc_native=$?
-        [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
 
-        if [[ $rc_native -eq 0 ]]; then
-            ok "suricata loaded all-rulesets.rules with our rules appended"
-            dim "in the output above, confirm:"
-            dim "  - a 'rules successfully loaded' line with 0 failed"
-            dim "  - no error lines naming SIDs in the 10000xx range"
-            [[ -n "$pcap" ]] && dim "  - which LOCAL IOT-DELIVERY SIDs fired on this capture"
-            cmd_test_sigma
-            return 0
+        # The exit code is NOT the verdict. so-suricata-testrule also runs the
+        # pcap stage, which can fail for reasons that have nothing to do with
+        # our rules (an empty capture, a missing /nsm/suripcap subdirectory).
+        # The authoritative line is Suricata's own rule-loading summary.
+        local outfile rc_native=0
+        outfile="$(mktemp)"
+        so-suricata-testrule "$SURICATA_RULES" "$target" 2>&1 | tee "$outfile" || rc_native=$?
+
+        local loadline failed
+        loadline="$(grep -oE '[0-9]+ rules successfully loaded, [0-9]+ rules failed' "$outfile" | tail -1)" || true
+
+        printf '\n'
+        if [[ -n "$loadline" ]]; then
+            failed="$(printf '%s' "$loadline" | grep -oE '[0-9]+ rules failed' | grep -oE '^[0-9]+')"
+            if [[ "$failed" -eq 0 ]]; then
+                ok "$loadline"
+                dim "all rules parsed, including ours, alongside the full production"
+                dim "ruleset - so no syntax errors and no SID collisions."
+            else
+                fail "$loadline"
+                rm -f "$outfile"; [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
+                die "rule validation failed - do not install until this passes"
+            fi
+        else
+            warn "could not find a rule-loading summary in the output"
+            dim "read the Suricata output above before installing anything."
         fi
-        warn "so-suricata-testrule returned $rc_native - see its output above"
-        dim "falling back to a direct container test..."
+
+        # Did our rules actually fire? so-suricata-testrule writes eve output
+        # under /tmp/nids-testing/output. Best-effort: absence proves nothing
+        # if the layout differs, so this never fails the run.
+        local evehits=""
+        evehits="$(grep -ho 'LOCAL IOT-DELIVERY[^"]*' /tmp/nids-testing/output/eve-*.json 2>/dev/null | sort -u)" || true
+        if [[ -n "$evehits" ]]; then
+            ok "rules fired on this capture:"
+            while IFS= read -r line; do [[ -n "$line" ]] && dim "  $line"; done <<< "$evehits"
+        elif [[ $selftest -eq 1 ]]; then
+            warn "no LOCAL IOT-DELIVERY alerts found in the test output"
+            dim "the rules PARSE (see above) but did not match the self-test packets."
+            dim "most likely cause: the self-test destination 192.168.1.10 is not"
+            dim "inside this grid's HOME_NET, so '-> \$HOME_NET' cannot match."
+            dim "regenerate with an in-range address:"
+            dim "  python3 tools/make-selftest-pcap.py --dst <ip-in-HOME_NET> /tmp/st.pcap"
+            dim "  sudo so-udp-delivery test /tmp/st.pcap"
+        fi
+
+        rm -f "$outfile"
+        [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
+        cmd_test_sigma
+        return 0
     fi
 
     # 2. Direct test inside the container. Two things make the naive
