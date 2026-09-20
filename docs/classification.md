@@ -60,10 +60,36 @@ is effectively unsearchable.
 
 ## Metadata — the pivot keys
 
-`metadata:` entries reach Elasticsearch as `rule.metadata.*` **only if the
-Suricata eve alert output has `metadata: yes`**. Check with
-`so-udp-delivery check`; without it, this entire scheme degrades to matching
-on rule-name substrings.
+`metadata:` entries reach Elasticsearch only if the Suricata eve alert output
+has `metadata` enabled (`yes`/`true`). Check with `so-udp-delivery check`;
+without it, this entire scheme degrades to matching on rule-name substrings.
+
+### Two places the keys can land, and why it matters
+
+Observed on SO 3.3.0:
+
+| field | type | accepts arbitrary keys? |
+|---|---|---|
+| `rule.metadata.<key>` | keyword | **only the mapped set** — the standard ET keys (`attack_target`, `signature_severity`, `mitre_*`, `deployment`, `created_at`, `cve`, `tag`, …) |
+| `suricata.eve.alert.metadata.<key>` | `flattened` | **yes** — a flattened field indexes whatever keys arrive |
+
+`delivery_class`, `delivery_kit` and `vector` are **not** ET-standard keys, so
+whether they appear under `rule.metadata.*` depends on the grid's ingest
+pipeline and dynamic mapping. The flattened field does not have that problem.
+
+So: after installing, check which form works on your grid and use that one.
+
+```
+# try this first - guaranteed to accept custom keys
+suricata.eve.alert.metadata.delivery_class:single_packet_udp
+
+# nicer if the pipeline maps it, but do not assume it
+rule.metadata.delivery_class:single_packet_udp
+```
+
+The ET-standard keys in these rules (`signature_severity`, `mitre_technique_id`,
+`attack_target`, `deployment`, `created_at`) will map to `rule.metadata.*`
+either way, which is part of why they are set.
 
 | key | values | what it is for |
 |---|---|---|

@@ -3,20 +3,27 @@
 # Elasticsearch query_string (Lucene) syntax, as used by SOC Hunt and by the
 # securityonion MCP tools. Lines starting with # are comments.
 #
-# Field names verified against a live SO 3.2 grid: zeek datasets are fully
+# Field names verified against a live SO 3.3.0 grid: zeek datasets are fully
 # qualified (zeek.conn, not conn); source.packets / destination.packets exist
 # on zeek.conn as longs.
 
 # --- post-deployment: what the local rules caught ---------------------------
 
+# NOTE on custom metadata keys: delivery_class / delivery_kit / vector are
+# not ET-standard, so they may not be mapped into rule.metadata.*. The
+# flattened suricata.eve.alert.metadata.* field always accepts them. Both
+# forms are given below - run each once after install and keep the one that
+# returns results. See docs/classification.md.
+
 # Everything these detections consider a single-packet UDP delivery.
+suricata.eve.alert.metadata.delivery_class:single_packet_udp
 rule.metadata.delivery_class:single_packet_udp
 
 # Broken down by targeted service.
-rule.metadata.delivery_class:single_packet_udp | groupby rule.metadata.vector
+suricata.eve.alert.metadata.delivery_class:single_packet_udp | groupby suricata.eve.alert.metadata.vector
 
 # The raw-socket kit, across every vector it was used against.
-rule.metadata.delivery_kit:d431 | groupby source.ip, destination.port
+suricata.eve.alert.metadata.delivery_kit:d431 | groupby source.ip, destination.port
 
 # Highest-confidence hits only: kit fingerprint AND downloader payload.
 rule.name:"LOCAL IOT-DELIVERY UDP Raw-Socket Kit Delivering Downloader Payload"

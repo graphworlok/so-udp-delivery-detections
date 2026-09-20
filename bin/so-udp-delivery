@@ -174,8 +174,19 @@ cmd_check() {
         local homenet
         homenet="$(grep -E '^\s*HOME_NET:' "$syaml" 2>/dev/null | head -1 | sed 's/^\s*//')" || true
         if [[ -n "$homenet" ]]; then
+            # A HOME_NET of nothing but RFC1918 space is the silent-failure
+            # case: single-packet UDP delivery is addressed to the public WAN
+            # address, so with no routable address in HOME_NET every rule here
+            # matches nothing and reports no error.
             info "$homenet"
-            dim "these rules are '-> \$HOME_NET'. Confirm the monitored WAN IP is inside it."
+            if printf '%s' "$homenet" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/32'; then
+                ok "contains a /32 - looks like the monitored WAN address is listed"
+            else
+                warn "no /32 host address in HOME_NET"
+                dim "these rules are '-> \$HOME_NET' and single-packet UDP delivery is"
+                dim "addressed to the public WAN IP. If that address is not inside"
+                dim "HOME_NET, nothing fires and nothing errors."
+            fi
         else
             warn "HOME_NET not found in $syaml (it may be set via pillar)"
         fi
@@ -185,13 +196,13 @@ cmd_check() {
         local cksum
         cksum="$(grep -E '^\s*checksum-validation:' "$syaml" 2>/dev/null | head -1 | sed 's/^\s*//')" || true
         if [[ -n "$cksum" ]]; then
-            if printf '%s' "$cksum" | grep -qi 'none'; then
+            if printf '%s' "$cksum" | grep -qiE ':\s*(none|false|no)\s*$'; then
                 ok "$cksum"
             else
                 warn "$cksum"
                 dim "packets with bad checksums may be skipped before rule evaluation."
                 dim "crafted delivery traffic sometimes has deliberately malformed checksums."
-                dim "see 'so-udp-delivery configure' for the pillar override."
+                dim "see 'so-udp-delivery configure' for the setting to change."
             fi
         else
             warn "checksum-validation not found in $syaml"
@@ -199,31 +210,80 @@ cmd_check() {
 
         # Without these, the alert reaches Elastic with no payload and no
         # metadata - which defeats the entire point of the exercise.
-        if grep -qE '^\s*payload:\s*yes' "$syaml" 2>/dev/null; then
-            ok "eve alert output: payload: yes"
-        else
-            fail "eve alert output does not have 'payload: yes'"
-            dim "without it the datagram bytes never reach Elasticsearch."
-        fi
+        #
+        # Suricata accepts yes/true/1 interchangeably and Security Onion
+        # writes booleans as true/false, so match all spellings. Matching only
+        # "yes" produces a false NEGATIVE on a grid that is correctly
+        # configured - which is exactly what this check did on SO 3.3.0.
+        check_eve_opt() {
+            local key="$1" level="$2" ; shift 2
+            if grep -qiE "^[[:space:]]*${key}:[[:space:]]*(yes|true|1)[[:space:]]*$" "$syaml" 2>/dev/null; then
+                ok "eve alert output: ${key} enabled"
+                return 0
+            fi
+            if grep -qiE "^[[:space:]]*${key}:" "$syaml" 2>/dev/null; then
+                "$level" "eve alert output: ${key} is present but not enabled"
+            else
+                "$level" "eve alert output: ${key} not found in $syaml"
+                dim "it may be set elsewhere - trust the empirical check below over this one."
+            fi
+            local line
+            for line in "$@"; do dim "$line"; done
+            return 1
+        }
 
-        if grep -qE '^\s*payload-printable:\s*yes' "$syaml" 2>/dev/null; then
-            ok "eve alert output: payload-printable: yes"
-        else
-            warn "eve alert output does not have 'payload-printable: yes'"
-            dim "printable payload is what makes a one-liner readable in Hunt."
-        fi
-
-        if grep -qE '^\s*metadata:\s*yes' "$syaml" 2>/dev/null; then
-            ok "eve alert output: metadata: yes"
-        else
-            warn "eve alert output does not have 'metadata: yes'"
-            dim "without it, delivery_class / delivery_kit / vector never become"
-            dim "rule.metadata.* fields, and the whole classification scheme is"
-            dim "reduced to matching on rule names."
-        fi
+        check_eve_opt payload fail \
+            "without it the datagram bytes never reach Elasticsearch." || true
+        check_eve_opt payload-printable warn \
+            "printable payload is what makes a one-liner readable in Hunt." || true
+        check_eve_opt metadata warn \
+            "without it, delivery_class / delivery_kit / vector never become" \
+            "queryable fields, and the classification scheme is reduced to" \
+            "matching on rule names." || true
     else
         warn "suricata.yaml not found"
         dim "probed: ${SURICATA_YAML_CANDIDATES[*]}"
+    fi
+
+    # Config parsing is fragile - key names, value spellings and file layout
+    # all move between releases. What actually reached Elasticsearch does not
+    # lie, so this section overrides the one above wherever they disagree.
+    head1 "Empirical check (authoritative - overrides the config parse above)"
+
+    if command -v so-elasticsearch-query >/dev/null 2>&1; then
+        local q_payload count_payload
+        q_payload='{"query":{"bool":{"filter":[{"exists":{"field":"network.data.decoded"}},{"range":{"@timestamp":{"gte":"now-24h"}}}]}}}'
+        count_payload="$(so-elasticsearch-query "*:logs-suricata.alerts-so/_count" -d "$q_payload" 2>/dev/null \
+            | tr ',' '\n' | grep -oE '"count":[0-9]+' | head -1 | cut -d: -f2)" || true
+
+        if [[ -n "${count_payload:-}" && "$count_payload" -gt 0 ]]; then
+            ok "$count_payload alerts in the last 24h carry network.data.decoded"
+            dim "payload logging is on, whatever the config parse above said."
+        elif [[ -n "${count_payload:-}" ]]; then
+            fail "no alerts in the last 24h carry a decoded payload"
+            dim "for single-packet UDP the alert IS the capture - fix this first."
+        else
+            warn "could not read a payload count from Elasticsearch"
+        fi
+
+        local q_meta count_meta
+        q_meta='{"query":{"bool":{"filter":[{"exists":{"field":"rule.metadata.signature_severity"}},{"range":{"@timestamp":{"gte":"now-24h"}}}]}}}'
+        count_meta="$(so-elasticsearch-query "*:logs-suricata.alerts-so/_count" -d "$q_meta" 2>/dev/null \
+            | tr ',' '\n' | grep -oE '"count":[0-9]+' | head -1 | cut -d: -f2)" || true
+
+        if [[ -n "${count_meta:-}" && "$count_meta" -gt 0 ]]; then
+            ok "$count_meta alerts in the last 24h carry rule.metadata.*"
+            dim "rule metadata survives ingest. After install, confirm the CUSTOM"
+            dim "keys survive too - see 'Metadata' in docs/classification.md."
+        else
+            warn "no rule.metadata.* seen in the last 24h"
+        fi
+    else
+        warn "so-elasticsearch-query not available - cannot verify empirically"
+        dim "check by hand in Hunt, over the last 24 hours:"
+        dim '  _exists_:network.data.decoded'
+        dim "if that returns results, payload logging is on regardless of what"
+        dim "the config parse above reported."
     fi
 
     head1 "Repo contents"
@@ -462,46 +522,62 @@ cmd_deploy() {
 # --- configure -------------------------------------------------------------
 
 cmd_configure() {
-    head1 "Pillar settings these detections depend on"
+    head1 "Grid settings these detections depend on"
 
     cat <<'PILLAREOF'
-Add to /opt/so/saltstack/local/pillar/global.sls (or the relevant minion
-pillar), then re-run: so-udp-delivery deploy --confirm
+On Security Onion 2.4 and later, set these through:
 
-  suricata:
-    config:
-      # Evaluate rules against packets with bad checksums. Crafted delivery
-      # traffic sometimes carries deliberately malformed checksums, and the
-      # default behaviour silently skips exactly the packets you want.
-      stream:
-        checksum-validation: none
+    SOC -> Administration -> Configuration -> suricata
 
-      outputs:
-        - eve-log:
-            types:
-              - alert:
-                  # payload      - the datagram bytes reach Elasticsearch,
-                  #                which is the whole point: for single-packet
-                  #                UDP the alert IS the capture.
-                  # metadata     - delivery_class / delivery_kit / vector
-                  #                become rule.metadata.* and therefore
-                  #                pivotable in Hunt.
-                  payload: yes
-                  payload-printable: yes
-                  packet: yes
-                  metadata: yes
+That writes the pillar for you with the correct schema for your release.
+Hand-editing /opt/so/saltstack/local/pillar/ works too, but the pillar layout
+has changed between releases and a wrong guess fails quietly.
 
-Also confirm HOME_NET contains the monitored WAN address. Every rule in this
-set is written '-> $HOME_NET'; if the WAN IP is outside it, nothing fires and
-the failure is silent.
+--- stream.checksum-validation ---------------------------------------------
 
-  # check the running value:
-  so-udp-delivery check
+Suricata skips rule evaluation on packets with bad checksums. Some crafted
+delivery traffic carries deliberately malformed checksums, so the default
+silently drops exactly the packets these rules target.
+
+    current:  checksum-validation: true
+    set to:   checksum-validation: false
+
+This is a BOOLEAN. "none" is not a valid value here - it belongs to
+af-packet's checksum-checks (auto|yes|no), which is a different setting.
+
+Note this is unrelated to the zero UDP checksum in the kit fingerprint (SID
+1000010). A zero UDP checksum is legal in IPv4 and means "not computed", so
+it is never treated as invalid.
+
+--- eve-log alert output ----------------------------------------------------
+
+    payload: true
+    payload-printable: true
+    packet: true
+    metadata: true
+
+payload  - for single-packet UDP the alert IS the capture. Without it you get
+           a detection with no evidence.
+metadata - carries delivery_class / delivery_kit / vector through to
+           Elasticsearch, which is what the classification scheme pivots on.
+
+Suricata accepts yes/true/1 interchangeably; Security Onion writes true/false.
+DO NOT change these based on the config parse in 'check' alone - check the
+empirical section, which counts what actually reached Elasticsearch. If
+payload is already arriving, leave this alone.
+
+--- HOME_NET ----------------------------------------------------------------
+
+Every rule here is written '-> $HOME_NET'. Single-packet UDP delivery is
+addressed to the public WAN IP, so that address must be inside HOME_NET. If it
+is not, nothing fires and nothing errors.
+
+    so-udp-delivery check     # prints the running value
 PILLAREOF
 
     printf '\n'
-    info "configure only prints - it does not edit pillar files."
-    dim "pillar edits are hand-applied deliberately; they affect the whole grid."
+    info "configure only prints - it does not edit anything."
+    dim "these settings affect the whole grid, so they are applied deliberately."
 }
 
 # --- verify ----------------------------------------------------------------

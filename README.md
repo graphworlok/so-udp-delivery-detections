@@ -81,19 +81,27 @@ in.
 
 ## Three settings decide whether any of this works
 
-`so-udp-delivery check` reports all three:
+`so-udp-delivery check` reports all three, and then checks the first two
+again **empirically** against what actually reached Elasticsearch. Where the
+config parse and the empirical check disagree, the empirical check is right —
+key names and value spellings move between releases, and a false negative here
+sends you off fixing something that was never broken.
 
-1. **`payload: yes` on the eve alert output.** For single-packet UDP the alert
-   *is* the capture. Without it you get a detection with no evidence.
-2. **`metadata: yes` on the same output.** Without it, `delivery_class`,
-   `delivery_kit` and `vector` never become `rule.metadata.*` fields and the
-   classification scheme degrades to rule-name substring matching.
+1. **`payload` on the eve alert output.** For single-packet UDP the alert *is*
+   the capture. Without it you get a detection with no evidence. Verify with
+   `_exists_:network.data.decoded` in Hunt.
+2. **`metadata` on the same output.** Carries `delivery_class` /
+   `delivery_kit` / `vector` through to Elasticsearch. Note these are not
+   ET-standard keys — see `docs/classification.md` for which field they land
+   in, because it is not always `rule.metadata.*`.
 3. **HOME_NET contains the monitored WAN address.** Every rule is written
-   `-> $HOME_NET`. If it doesn't, nothing fires and nothing errors.
+   `-> $HOME_NET`, and single-packet delivery is addressed to the public WAN
+   IP. If that address is outside HOME_NET, nothing fires and nothing errors.
 
 Also check `checksum-validation` — Suricata skips rule evaluation on
 bad-checksum packets by default, and some crafted delivery traffic carries
-deliberately malformed checksums.
+deliberately malformed checksums. It is a boolean (`true`/`false`); `none` is
+not valid there.
 
 ## Status and caveats
 
@@ -105,12 +113,19 @@ Read these before trusting a rule.
   a struct definition. Validate with `import-pcap` against a known Easydisc
   datagram before trusting them; `docs/validation.md` says what to check.
 - **The SO install paths are probed, not confirmed.** Security Onion has moved
-  the local-rules location between releases. `check` prints which path it
-  chose; use `--rules-path` if it chose wrong, rather than letting it guess.
-- **`network.data.decoded` in the second Sigma rule varies by grid.** Confirm
-  the field exists before enabling that one.
-- `zeek.conn`, `source.packets` and `destination.packets` *are* confirmed
-  against a live SO 3.2 grid.
+  the local-rules location between releases, and on a grid where SOC manages
+  detections in Elasticsearch a hand-written rules file may be ignored
+  entirely. `check` prints which path it chose — confirm it against
+  `rule-files:` in `suricata.yaml` before installing, and prefer the
+  `export-soc` / SOC Detections route if they disagree.
+- **Custom metadata keys may not reach `rule.metadata.*`.** On SO 3.3.0 that
+  field maps the ET-standard key set; `suricata.eve.alert.metadata` is
+  `flattened` and takes arbitrary keys. Check which works before building
+  saved queries on either.
+
+Confirmed against a live SO 3.3.0 grid: the `so-detection` schema `export-soc`
+emits, `zeek.conn` / `source.packets` / `destination.packets`, and that payload
+and rule metadata do reach Elasticsearch there.
 
 ## Relationship to other work
 
