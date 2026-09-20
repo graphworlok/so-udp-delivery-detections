@@ -3,14 +3,49 @@
 Two routes. Both end with the same detections on the grid; pick whichever
 matches how you already manage Security Onion.
 
+## Step 0 — getting the files onto the manager
+
+**This repo is private**, so an unauthenticated `git clone` on the manager will
+fail. Three ways round it, in increasing order of how much you are committing
+to:
+
+**Copy them over.** Nothing needs to persist on the manager, and this leaves no
+credentials on a sensor:
+
+```bash
+# from the workstation that has the clone
+rsync -av --exclude .git ./so-udp-delivery-detections/ \
+    <user>@<manager>:~/so-udp-delivery-detections/
+```
+
+**A read-only deploy key**, if you want `git pull` on the manager to work:
+
+```bash
+# on the manager
+ssh-keygen -t ed25519 -f ~/.ssh/so-udp-delivery -N ''
+cat ~/.ssh/so-udp-delivery.pub
+# add that key at: Settings -> Deploy keys -> Add deploy key (leave write access off)
+GIT_SSH_COMMAND='ssh -i ~/.ssh/so-udp-delivery' \
+    git clone git@github.com:graphworlok/so-udp-delivery-detections.git
+```
+
+**`gh auth login` on the manager.** Works, but it puts a token with access to
+every private repo on the account onto a sensor. Prefer one of the above.
+
+Whichever route, make the scripts executable after transfer — rsync preserves
+the bit, a zip download does not:
+
+```bash
+chmod +x bin/so-udp-delivery tests/test-rules.sh
+```
+
 ## Route A — the CLI (file-based)
 
 Runs on the manager, writes into the grid's local rules location, applies the
 salt state.
 
 ```bash
-git clone https://github.com/graphworlok/so-udp-delivery-detections
-cd so-udp-delivery-detections
+cd ~/so-udp-delivery-detections
 
 sudo ./bin/so-udp-delivery check              # read-only survey. Start here.
 sudo ./bin/so-udp-delivery test               # suricata -T syntax validation
