@@ -64,32 +64,20 @@ is effectively unsearchable.
 has `metadata` enabled (`yes`/`true`). Check with `so-udp-delivery check`;
 without it, this entire scheme degrades to matching on rule-name substrings.
 
-### Two places the keys can land, and why it matters
+### Where the keys land
 
-Observed on SO 3.3.0:
-
-| field | type | accepts arbitrary keys? |
-|---|---|---|
-| `rule.metadata.<key>` | keyword | **only the mapped set** — the standard ET keys (`attack_target`, `signature_severity`, `mitre_*`, `deployment`, `created_at`, `cve`, `tag`, …) |
-| `suricata.eve.alert.metadata.<key>` | `flattened` | **yes** — a flattened field indexes whatever keys arrive |
-
-`delivery_class`, `delivery_kit` and `vector` are **not** ET-standard keys, so
-whether they appear under `rule.metadata.*` depends on the grid's ingest
-pipeline and dynamic mapping. The flattened field does not have that problem.
-
-So: after installing, check which form works on your grid and use that one.
+**Settled on SO 3.3.0 against live alerts: use `rule.metadata.*`.** The ingest
+pipeline maps custom keys dynamically, so `delivery_class`, `delivery_kit` and
+`vector` all arrive there despite not being ET-standard:
 
 ```
-# try this first - guaranteed to accept custom keys
-suricata.eve.alert.metadata.delivery_class:single_packet_udp
-
-# nicer if the pipeline maps it, but do not assume it
-rule.metadata.delivery_class:single_packet_udp
+rule.metadata.delivery_class:single_packet_udp     -> 6 hits
+suricata.eve.alert.metadata.delivery_class:...     -> 0 hits
 ```
 
-The ET-standard keys in these rules (`signature_severity`, `mitre_technique_id`,
-`attack_target`, `deployment`, `created_at`) will map to `rule.metadata.*`
-either way, which is part of why they are set.
+The `suricata.eve.alert.metadata` field is mapped `flattened` and would accept
+arbitrary keys, but on this grid the alerts do not populate it. Check once on
+a new grid rather than assuming either way.
 
 | key | values | what it is for |
 |---|---|---|
@@ -113,6 +101,29 @@ signature.
 
 The one exception is `delivery_kit`, which is a property of the sender's code
 rather than of a campaign, and is stable enough to encode.
+
+Live evidence for this, 2026-09-20: the same payload set is served from one
+staging host under at least three different operator tags — `geico`,
+`victoria` and `magicdvr` — keyed to the delivery vector rather than to the
+code. A rule named for any one of them would have been wrong for the other
+two, against byte-identical binaries.
+
+## Known false-positive class: SID 1000010
+
+The bare kit fingerprint matches any raw-socket sender using IP ID 54321 with
+DF clear and a zero UDP checksum. That includes amplification-reflection
+scanners, which is not a delivery. Observed 2026-09-20: a source sweeping
+UDP/389, UDP/53 and UDP/3702 (WS-Discovery) tripped `1000010` with a 3-byte
+payload and no downloader verb.
+
+This is the rule working as designed — 54321 is a common raw-socket constant,
+so a bare hit means "some crafting kit", never a family. The composite
+`1000011` requires a downloader verb as well and correctly did not fire.
+
+If the scanner noise outweighs the value of catching unknown vectors, narrow
+`1000010` with `dsize:>40` or exclude the well-known amplification ports
+(`53`, `123`, `389`, `1900`, `3702`, `11211`). Do not remove it — catching a
+vector nobody has characterised yet is the entire point of that layer.
 
 ## Worked queries
 

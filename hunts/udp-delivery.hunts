@@ -9,21 +9,25 @@
 
 # --- post-deployment: what the local rules caught ---------------------------
 
-# NOTE on custom metadata keys: delivery_class / delivery_kit / vector are
-# not ET-standard, so they may not be mapped into rule.metadata.*. The
-# flattened suricata.eve.alert.metadata.* field always accepts them. Both
-# forms are given below - run each once after install and keep the one that
-# returns results. See docs/classification.md.
+# SETTLED 2026-09-20 against live alerts: custom metadata keys DO reach
+# rule.metadata.*, because Security Onion's ingest maps them dynamically.
+# rule.metadata.delivery_class returned 6 hits where the flattened
+# suricata.eve.alert.metadata.* form returned 0. Use rule.metadata.*.
 
 # Everything these detections consider a single-packet UDP delivery.
-suricata.eve.alert.metadata.delivery_class:single_packet_udp
 rule.metadata.delivery_class:single_packet_udp
 
 # Broken down by targeted service.
-suricata.eve.alert.metadata.delivery_class:single_packet_udp | groupby suricata.eve.alert.metadata.vector
+rule.metadata.delivery_class:single_packet_udp | groupby rule.metadata.vector
 
-# The raw-socket kit, across every vector it was used against.
-suricata.eve.alert.metadata.delivery_kit:d431 | groupby source.ip, destination.port
+# The raw-socket kit, across every vector it was used against. Note this
+# also catches amplification scanners that happen to use IP ID 54321 - see
+# the 1000010 note in docs/classification.md.
+rule.metadata.delivery_kit:d431 | groupby source.ip, destination.port
+
+# Kit hits that are actually deliveries: the composite rule requires a
+# downloader verb as well, so it excludes the scanner population.
+rule.name:"LOCAL IOT-DELIVERY UDP Raw-Socket Kit Delivering Downloader Payload"
 
 # Highest-confidence hits only: kit fingerprint AND downloader payload.
 rule.name:"LOCAL IOT-DELIVERY UDP Raw-Socket Kit Delivering Downloader Payload"
