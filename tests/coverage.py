@@ -94,7 +94,9 @@ def load_corpus(path):
     rows = []
     with open(path, encoding="utf-8") as fh:
         for line in fh:
-            line = line.rstrip("\n")
+            # Strip CR too: a CRLF checkout would otherwise leave \r on the
+            # end of every payload and quietly change what the rules match.
+            line = line.rstrip("\r\n")
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             parts = line.split("\t")

@@ -4,6 +4,7 @@
 # platform they were authored on.
 *.sh        text eol=lf
 *.py        text eol=lf
+*.tsv       text eol=lf
 *.rules     text eol=lf
 *.yml       text eol=lf
 *.hunts     text eol=lf

@@ -86,6 +86,17 @@ else
     printf '  skip python3 not available\n'
 fi
 
+printf '\n== coverage against real observed payloads ==\n'
+if command -v python3 >/dev/null 2>&1; then
+    if python3 "${REPO_ROOT}/tests/coverage.py" >/dev/null 2>&1; then
+        ok "every corpus payload matches at least one content rule"
+    else
+        bad "a corpus payload is matched by NO content rule - run tests/coverage.py"
+    fi
+else
+    printf '  skip python3 not available\n'
+fi
+
 printf '\n== cli ==\n'
 if bash -n "${REPO_ROOT}/bin/so-udp-delivery" 2>/dev/null; then
     ok "so-udp-delivery parses"
