@@ -391,22 +391,53 @@ cmd_test() {
 
     [[ -f "$SURICATA_RULES" ]] || die "missing $SURICATA_RULES"
 
-    local syaml
+    local syaml pcap="${1:-}"
     syaml="$(discover_suricata_yaml || true)"
 
-    # 1. Security Onion ships its own rule tester. It knows where the binary
-    #    lives and which paths the container can see, so prefer it.
+    # 1. Security Onion ships its own rule tester:
+    #
+    #      so-suricata-testrule <CustomRule> <TargetPCAP>
+    #
+    #    It appends the custom rules to a COPY of all-rulesets.rules (the live
+    #    ruleset is not touched) and runs Suricata over the pcap in a
+    #    purpose-built container with the right mounts. It knows where the
+    #    binary lives and which paths are visible inside, so prefer it.
+    #
+    #    It requires a pcap. For a syntax-only check we hand it an empty one:
+    #    Suricata still loads and parses every rule, then processes zero
+    #    packets, so rule errors surface exactly the same way.
     if command -v so-suricata-testrule >/dev/null 2>&1; then
-        info "using so-suricata-testrule (Security Onion's own rule tester)"
-        if so-suricata-testrule "$SURICATA_RULES"; then
-            ok "rules parse cleanly"
+        local target="$pcap" tmpdir=""
+        if [[ -z "$target" ]]; then
+            tmpdir="$(mktemp -d)"
+            target="${tmpdir}/empty.pcap"
+            # 24-byte libpcap file header, no packets: LE magic, v2.4,
+            # snaplen 65535, linktype 1 (Ethernet).
+            printf '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00' > "$target"
+            info "syntax-only check against an empty pcap"
+            dim "to see which rules actually FIRE, pass a real capture:"
+            dim "  so-udp-delivery test /path/to/delivery.pcap"
+        else
+            [[ -f "$target" ]] || die "no such pcap: $target"
+            info "running the rules against $target"
+        fi
+
+        info "so-suricata-testrule $SURICATA_RULES $target"
+        local rc_native=0
+        so-suricata-testrule "$SURICATA_RULES" "$target" || rc_native=$?
+        [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
+
+        if [[ $rc_native -eq 0 ]]; then
+            ok "suricata loaded all-rulesets.rules with our rules appended"
+            dim "in the output above, confirm:"
+            dim "  - a 'rules successfully loaded' line with 0 failed"
+            dim "  - no error lines naming SIDs in the 10000xx range"
+            [[ -n "$pcap" ]] && dim "  - which LOCAL IOT-DELIVERY SIDs fired on this capture"
             cmd_test_sigma
             return 0
         fi
-        warn "so-suricata-testrule returned non-zero"
-        dim "that may mean the rules are bad, or that it takes different"
-        dim "arguments than a file path. Check with:  so-suricata-testrule --help"
-        dim "falling back to a direct test in the container..."
+        warn "so-suricata-testrule returned $rc_native - see its output above"
+        dim "falling back to a direct container test..."
     fi
 
     # 2. Direct test inside the container. Two things make the naive
@@ -931,7 +962,10 @@ COMMANDS
   check                  Read-only survey: SO version, install targets, and the
                          configuration settings that decide whether these rules
                          can fire at all. Start here. (default)
-  test                   Validate rule syntax with suricata -T. Run before install.
+  test [pcap]            Load the rules through Suricata via Security Onion's
+                         own so-suricata-testrule. With no argument this is a
+                         syntax check; given a pcap it also shows which rules
+                         fire on that capture. Run before install.
   install                Install the rules into the grid's local rules location.
   remove                 Remove the managed block and the installed Sigma rules.
   deploy                 Apply salt states and restart Suricata / ElastAlert.
@@ -990,7 +1024,7 @@ done
 
 case "${CMD:-check}" in
     check)        cmd_check ;;
-    test)         cmd_test ;;
+    test)         cmd_test "${ARGS[@]:-}" ;;
     install)      cmd_install ;;
     remove)       cmd_remove ;;
     deploy)       cmd_deploy ;;

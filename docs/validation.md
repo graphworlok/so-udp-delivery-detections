@@ -4,6 +4,37 @@ A detection you have not seen fire is a hypothesis. These rules target traffic
 that arrives unpredictably, so waiting for the next live delivery is a bad
 feedback loop. Replay a known-good capture instead.
 
+## so-suricata-testrule — the tool to use
+
+Security Onion ships `/usr/sbin/so-suricata-testrule`, and it is better suited
+to this than anything this repo could build:
+
+```
+so-suricata-testrule <CustomRule> <TargetPCAP>
+```
+
+It copies `/opt/so/rules/suricata/all-rulesets.rules` to a scratch directory,
+**appends** your rule file to that copy, and runs Suricata over the pcap in a
+container with the right mounts. Two properties matter here:
+
+- **The live ruleset is not touched.** It works on a copy, so a broken rule
+  cannot affect the running sensor.
+- **Your rules are tested alongside the full production ruleset**, so SID
+  collisions and interactions surface, not just standalone syntax.
+
+`so-udp-delivery test` wraps it. With no argument it generates an empty
+24-byte pcap, which is enough to make Suricata load and parse every rule
+without processing any packets — a syntax check. Given a pcap, it shows which
+rules actually fire:
+
+```bash
+sudo ./bin/so-udp-delivery test                      # syntax only
+sudo ./bin/so-udp-delivery test /tmp/delivery.pcap   # what fires
+```
+
+In the output, confirm a `rules successfully loaded` line with zero failures,
+and no error lines naming SIDs in the `10000xx` range.
+
 ## Positive control via so-import-pcap
 
 `so-import-pcap` replays a pcap through Suricata and Zeek and indexes the
