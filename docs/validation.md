@@ -22,14 +22,13 @@ container with the right mounts. Two properties matter here:
 - **Your rules are tested alongside the full production ruleset**, so SID
   collisions and interactions surface, not just standalone syntax.
 
-`so-udp-delivery test` wraps it. With no argument it generates an empty
-24-byte pcap, which is enough to make Suricata load and parse every rule
-without processing any packets — a syntax check. Given a pcap, it shows which
-rules actually fire:
+`so-udp-delivery test` wraps it. With no argument it generates a self-test
+capture (below) so the run is a positive control rather than a bare syntax
+check. Given a pcap, it runs the rules against that instead:
 
 ```bash
-sudo ./bin/so-udp-delivery test                      # syntax only
-sudo ./bin/so-udp-delivery test /tmp/delivery.pcap   # what fires
+sudo ./bin/so-udp-delivery test                      # self-test capture
+sudo ./bin/so-udp-delivery test /tmp/delivery.pcap   # a real capture
 ```
 
 `test` reads the verdict from Suricata's own rule-loading summary, not from
