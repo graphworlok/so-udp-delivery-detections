@@ -105,6 +105,29 @@ def parse_rules(path):
     return out
 
 
+def get_field(source, name):
+    """Read so_detection.<name> from a _source that may be flat or nested.
+
+    Elasticsearch accepts dotted keys in a document and expands them into
+    nested objects, so _source can come back either as
+    {"so_detection.content": ...} or {"so_detection": {"content": ...}}
+    depending on how the document was written. Reading only the flat form
+    silently returns None for every field, which makes every rule look
+    changed and every rev look unknown.
+    """
+    flat = source.get("so_detection.%s" % name)
+    if flat is not None:
+        return flat
+    nested = source.get("so_detection")
+    if isinstance(nested, dict):
+        return nested.get(name)
+    return None
+
+
+def source_is_nested(source):
+    return isinstance(source.get("so_detection"), dict)
+
+
 def find_detection(session, public_id):
     query = {
         "query": {"bool": {"filter": [
@@ -134,33 +157,39 @@ def borrow_user_id(session):
     r = session.get("%s/%s/_search" % (ES_URL, INDEX), json=query)
     r.raise_for_status()
     hits = r.json().get("hits", {}).get("hits", [])
-    return hits[0]["_source"].get("so_detection.userId") if hits else None
+    return get_field(hits[0]["_source"], "userId") if hits else None
 
 
-def build_doc(rule, author, user_id, now):
-    return {
-        "@timestamp": now,
-        "so_detection.createTime": now,
-        "so_detection.userId": user_id,
-        "so_detection.publicId": rule["sid"],
-        "so_detection.title": rule["title"],
-        "so_detection.severity": rule["severity"],
-        "so_detection.author": author,
-        "so_detection.description": SOC_DEFAULT_DESCRIPTION,
-        "so_detection.content": rule["content"],
-        "so_detection.isEnabled": True,
-        "so_detection.isReporting": False,
-        "so_detection.isCommunity": False,
-        "so_detection.engine": ENGINE,
-        "so_detection.language": ENGINE,
-        "so_detection.overrides": [],
-        "so_detection.tags": None,
-        "so_detection.ruleset": RULESET,
-        "so_detection.license": SOC_DEFAULT_LICENSE,
-        "so_detection.sourceCreated": rule["sourceCreated"],
-        "so_detection.sourceUpdated": None,
-        "so_kind": "detection",
+def build_doc(rule, author, user_id, now, nested=False):
+    """Build the document, mirroring the shape existing detections use."""
+    detection = {
+        "createTime": now,
+        "userId": user_id,
+        "publicId": rule["sid"],
+        "title": rule["title"],
+        "severity": rule["severity"],
+        "author": author,
+        "description": SOC_DEFAULT_DESCRIPTION,
+        "content": rule["content"],
+        "isEnabled": True,
+        "isReporting": False,
+        "isCommunity": False,
+        "engine": ENGINE,
+        "language": ENGINE,
+        "overrides": [],
+        "tags": None,
+        "ruleset": RULESET,
+        "license": SOC_DEFAULT_LICENSE,
+        "sourceCreated": rule["sourceCreated"],
+        "sourceUpdated": None,
     }
+    if nested:
+        return {"@timestamp": now, "so_kind": "detection",
+                "so_detection": detection}
+    doc = {"@timestamp": now, "so_kind": "detection"}
+    for key, value in detection.items():
+        doc["so_detection.%s" % key] = value
+    return doc
 
 
 def rev_of(content):
@@ -201,7 +230,7 @@ def main():
         existing = find_detection(session, rule["sid"])
         if existing is None:
             creates.append((rule, None))
-        elif existing["_source"].get("so_detection.content") != rule["content"]:
+        elif get_field(existing["_source"], "content") != rule["content"]:
             updates.append((rule, existing))
         else:
             unchanged.append((rule, existing))
@@ -210,7 +239,7 @@ def main():
         print("  CREATE  %s  rev:%d  %s" % (rule["sid"], rule["rev"], rule["title"]))
     for rule, existing in updates:
         print("  UPDATE  %s  rev:%s -> %d  %s" % (
-            rule["sid"], rev_of(existing["_source"].get("so_detection.content")),
+            rule["sid"], rev_of(get_field(existing["_source"], "content")),
             rule["rev"], rule["title"]))
     for rule, _ in unchanged:
         print("  same    %s  rev:%d" % (rule["sid"], rule["rev"]))
@@ -224,6 +253,13 @@ def main():
         print("Validate first if you have not:  sudo so-udp-delivery test")
         return 0
 
+    # Write new documents in whatever shape the index already holds, rather
+    # than assuming. Any existing detection answers the question.
+    nested_shape = False
+    probe = (updates or unchanged)
+    if probe:
+        nested_shape = source_is_nested(probe[0][1]["_source"])
+
     user_id = borrow_user_id(session)
     if creates and user_id is None:
         sys.stderr.write(
@@ -235,7 +271,8 @@ def main():
     for rule, _ in creates:
         doc_id = str(uuid.uuid4())
         r = session.put("%s/%s/_doc/%s?refresh=true" % (ES_URL, INDEX, doc_id),
-                        json=build_doc(rule, args.author, user_id, now))
+                        json=build_doc(rule, args.author, user_id, now,
+                                       nested=nested_shape))
         if r.status_code >= 300:
             sys.stderr.write("create %s failed: %s %s\n"
                              % (rule["sid"], r.status_code, r.text[:200]))
