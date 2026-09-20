@@ -391,44 +391,95 @@ cmd_test() {
 
     [[ -f "$SURICATA_RULES" ]] || die "missing $SURICATA_RULES"
 
-    local syaml suri_cmd
+    local syaml
     syaml="$(discover_suricata_yaml || true)"
 
-    if command -v suricata >/dev/null 2>&1; then
-        suri_cmd="suricata"
-    elif command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^so-suricata$'; then
-        info "using the so-suricata container"
-        suri_cmd="docker exec so-suricata suricata"
-    else
-        die "no suricata binary and no so-suricata container - cannot validate syntax"
+    # 1. Security Onion ships its own rule tester. It knows where the binary
+    #    lives and which paths the container can see, so prefer it.
+    if command -v so-suricata-testrule >/dev/null 2>&1; then
+        info "using so-suricata-testrule (Security Onion's own rule tester)"
+        if so-suricata-testrule "$SURICATA_RULES"; then
+            ok "rules parse cleanly"
+            cmd_test_sigma
+            return 0
+        fi
+        warn "so-suricata-testrule returned non-zero"
+        dim "that may mean the rules are bad, or that it takes different"
+        dim "arguments than a file path. Check with:  so-suricata-testrule --help"
+        dim "falling back to a direct test in the container..."
     fi
 
-    local args=(-T -S "$SURICATA_RULES")
-    [[ -n "$syaml" ]] && args=(-T -c "$syaml" -S "$SURICATA_RULES")
+    # 2. Direct test inside the container. Two things make the naive
+    #    'docker exec so-suricata suricata' fail on a real grid: the binary is
+    #    not necessarily called 'suricata' on $PATH in there, and the rules
+    #    file lives on the host outside anything the container mounts - so it
+    #    has to be copied in rather than referenced by host path.
+    command -v docker >/dev/null 2>&1 \
+        || die "no so-suricata-testrule and no docker - cannot validate syntax"
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^so-suricata$' \
+        || die "the so-suricata container is not running - cannot validate syntax"
 
-    info "running: $suri_cmd ${args[*]}"
-    if $suri_cmd "${args[@]}"; then
+    local bin="" cand
+    for cand in suricata /usr/bin/suricata /usr/sbin/suricata /usr/local/bin/suricata; do
+        if docker exec so-suricata sh -c "command -v '$cand' >/dev/null 2>&1" 2>/dev/null; then
+            bin="$cand"; break
+        fi
+    done
+    if [[ -z "$bin" ]]; then
+        fail "could not find a suricata binary inside the so-suricata container"
+        dim "probed: suricata /usr/bin/suricata /usr/sbin/suricata /usr/local/bin/suricata"
+        dim "find it with:  docker exec so-suricata sh -c 'ls -l /usr/bin | grep -i suri'"
+        die "cannot validate syntax"
+    fi
+    info "suricata binary inside container: $bin"
+
+    local inpath="/tmp/udp-delivery-test.rules"
+    docker cp "$SURICATA_RULES" "so-suricata:${inpath}" >/dev/null 2>&1 \
+        || die "docker cp of the rules file into the container failed"
+    info "rules copied into the container at $inpath"
+
+    local rc=0
+    if [[ -n "$syaml" ]]; then
+        info "running: $bin -T -c $syaml -S $inpath"
+        docker exec so-suricata "$bin" -T -c "$syaml" -S "$inpath" || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            warn "test with -c $syaml failed; retrying without an explicit config"
+            rc=0
+            docker exec so-suricata "$bin" -T -S "$inpath" || rc=$?
+        fi
+    else
+        info "running: $bin -T -S $inpath"
+        docker exec so-suricata "$bin" -T -S "$inpath" || rc=$?
+    fi
+
+    docker exec so-suricata rm -f "$inpath" >/dev/null 2>&1 || true
+
+    if [[ $rc -eq 0 ]]; then
         ok "rules parse cleanly"
     else
         die "rule validation failed - do not install until this passes"
     fi
 
+    cmd_test_sigma
+}
+
+cmd_test_sigma() {
     head1 "Sigma rule syntax"
-    local f rc=0
+    local f sigma_rc=0
     for f in "$SIGMA_DIR"/*.yml; do
         [[ -e "$f" ]] || continue
         if command -v python3 >/dev/null 2>&1; then
             if python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" "$f" 2>/dev/null; then
                 ok "$(basename "$f")"
             else
-                fail "$(basename "$f") - YAML does not parse"; rc=1
+                fail "$(basename "$f") - YAML does not parse"; sigma_rc=1
             fi
         else
             warn "python3 not available, skipping YAML validation"
             break
         fi
     done
-    [[ $rc -eq 0 ]] || die "fix the Sigma rules before installing"
+    [[ $sigma_rc -eq 0 ]] || die "fix the Sigma rules before installing"
 }
 
 # --- install ---------------------------------------------------------------
