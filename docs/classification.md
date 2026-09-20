@@ -102,11 +102,21 @@ signature.
 The one exception is `delivery_kit`, which is a property of the sender's code
 rather than of a campaign, and is stable enough to encode.
 
-Live evidence for this, 2026-09-20: the same payload set is served from one
-staging host under at least three different operator tags — `geico`,
-`victoria` and `magicdvr` — keyed to the delivery vector rather than to the
-code. A rule named for any one of them would have been wrong for the other
-two, against byte-identical binaries.
+Live evidence for this, 2026-09-20: one staging host serves byte-identical
+payloads under at least three operator tags — `geico`, `victoria` and
+`magicdvr`. The tag is `argv[1]`, reported to C2 as the bot's provenance, and
+it varies per campaign.
+
+Be careful what the tags are evidence *of*. `geico` is tied to a known exploit
+vector because we captured the delivery datagram on UDP/43562. `victoria` and
+`magicdvr` were seen only in scripts the staging host serves from its own
+TCP/23 and TCP/2222 listeners — that is the **drop** stage, fetched outbound
+by a host that has already been exploited by some other means, the same
+architecture as the raw-ELF ports 7000-7016. Those ports are not exploit
+vectors and the upstream vector for those two campaigns is unknown.
+
+The naming point stands regardless: a rule named for any one tag would have
+been wrong for the other two, against identical binaries.
 
 ## Known false-positive class: SID 1000010
 
