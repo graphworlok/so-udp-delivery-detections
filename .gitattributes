@@ -3,6 +3,7 @@
 # bash\r" and break the rules parser, so force LF regardless of the
 # platform they were authored on.
 *.sh        text eol=lf
+*.py        text eol=lf
 *.rules     text eol=lf
 *.yml       text eol=lf
 *.hunts     text eol=lf
