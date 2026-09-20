@@ -102,6 +102,21 @@ discover_suricata_yaml() {
     discover_first_existing "${SURICATA_YAML_CANDIDATES[@]}"
 }
 
+rules_path_is_loaded() {
+    # True if Suricata's rule-files list mentions this file. Returns 2 when
+    # the question cannot be answered (no suricata.yaml, no rule-files block),
+    # which the caller treats as "unknown", not as "no".
+    local path="$1" syaml rulefiles
+    syaml="$(discover_suricata_yaml)" || return 2
+    rulefiles="$(awk '
+        /^[[:space:]]*rule-files:/ { flag=1; next }
+        flag && /^[[:space:]]*-[[:space:]]*/ { sub(/^[[:space:]]*-[[:space:]]*/,""); print; next }
+        flag { exit }
+    ' "$syaml" 2>/dev/null)" || return 2
+    [[ -n "$rulefiles" ]] || return 2
+    printf '%s\n' "$rulefiles" | grep -qF "$(basename "$path")"
+}
+
 so_version() {
     if [[ -r /etc/soversion ]]; then
         cat /etc/soversion
@@ -169,6 +184,40 @@ cmd_check() {
     if syaml="$(discover_suricata_yaml)"; then
         ok "suricata.yaml: $syaml"
 
+        # THE decisive check. Discovering that a directory exists says nothing
+        # about whether Suricata reads a file we put there. On a grid where
+        # SOC generates the rules file from the so-detection index, a
+        # hand-written local.rules is silently ignored - the install appears
+        # to succeed and nothing ever fires.
+        local defrulepath rulefiles rf
+        defrulepath="$(grep -E '^\s*default-rule-path:' "$syaml" 2>/dev/null | head -1 | sed 's/^\s*//')" || true
+        [[ -n "$defrulepath" ]] && dim "$defrulepath"
+
+        rulefiles="$(awk '
+            /^[[:space:]]*rule-files:/ { flag=1; next }
+            flag && /^[[:space:]]*-[[:space:]]*/ { sub(/^[[:space:]]*-[[:space:]]*/,""); print; next }
+            flag { exit }
+        ' "$syaml" 2>/dev/null)" || true
+
+        if [[ -n "$rulefiles" ]]; then
+            info "suricata loads these rule files:"
+            while IFS= read -r rf; do [[ -n "$rf" ]] && dim "  $rf"; done <<< "$rulefiles"
+
+            if [[ -n "${rules_path:-}" ]] \
+                && printf '%s\n' "$rulefiles" | grep -qF "$(basename "$rules_path")"; then
+                ok "$(basename "$rules_path") IS in the loaded set - the file route works here"
+            else
+                fail "$(basename "$rules_path") is NOT in the set Suricata loads"
+                dim "writing rules there would have no effect and no error."
+                dim "use the SOC Detections route instead:"
+                dim "  so-udp-delivery export-soc    (or paste rules into SOC -> Detections)"
+                dim "'install' will refuse to write to an unloaded path."
+            fi
+        else
+            warn "no rule-files: block found in $syaml"
+            dim "cannot confirm the discovered path is actually loaded."
+        fi
+
         # HOME_NET must contain the monitored WAN address or every rule in
         # this set matches nothing at all.
         local homenet
@@ -232,10 +281,16 @@ cmd_check() {
             return 1
         }
 
-        check_eve_opt payload fail \
-            "without it the datagram bytes never reach Elasticsearch." || true
-        check_eve_opt payload-printable warn \
-            "printable payload is what makes a one-liner readable in Hunt." || true
+        # payload-printable is the one that matters. Security Onion maps eve's
+        # payload_printable to network.data.decoded, which is the field every
+        # hunt in this repo reads. Plain `payload` adds the raw base64 copy -
+        # useful for byte-exact work on binary vectors like Easydisc, but not
+        # required, and retained pcap is the better source for that anyway.
+        check_eve_opt payload-printable fail \
+            "this is what populates network.data.decoded - the field the hunts read." || true
+        check_eve_opt payload warn \
+            "optional. Adds the raw base64 copy alongside the printable one." \
+            "worth enabling for byte-exact work on binary vectors; not a blocker." || true
         check_eve_opt metadata warn \
             "without it, delivery_class / delivery_kit / vector never become" \
             "queryable fields, and the classification scheme is reduced to" \
@@ -380,6 +435,30 @@ cmd_install() {
     info "target: $rules_path"
 
     [[ -f "$SURICATA_RULES" ]] || die "missing $SURICATA_RULES"
+
+    # Refuse to write somewhere Suricata will not read from. A silent no-op
+    # install is worse than a failed one: the rules look deployed, nothing
+    # fires, and the natural conclusion is that the rules are wrong.
+    local loaded_rc=0
+    rules_path_is_loaded "$rules_path" || loaded_rc=$?
+    case $loaded_rc in
+        0) ok "$(basename "$rules_path") is in Suricata's rule-files - safe to write" ;;
+        2) warn "could not determine whether Suricata loads $(basename "$rules_path")"
+           dim "proceeding, but confirm with 'verify' after deploy." ;;
+        *) fail "$rules_path is NOT in Suricata's rule-files list"
+           dim ""
+           dim "Writing there would have no effect. On Security Onion 2.4+ SOC"
+           dim "generates the rules file from the so-detection index, so a"
+           dim "hand-written local.rules can be ignored entirely."
+           dim ""
+           dim "Use the SOC Detections route instead:"
+           dim "  ./bin/so-udp-delivery export-soc > detections.ndjson"
+           dim "  or paste rules into SOC -> Detections -> New Detection"
+           dim ""
+           dim "To override anyway: --force (not recommended)"
+           [[ "${OPT_FORCE:-0}" -eq 1 ]] || die "refusing to install to an unloaded path"
+           warn "--force given, continuing against an unloaded path" ;;
+    esac
 
     backup_file "$rules_path"
 
@@ -756,6 +835,8 @@ OPTIONS
   --confirm              Actually make changes. Without it, every mutating
                          command is a dry run that prints what it would do.
   --rules-path <path>    Override the discovered local.rules location.
+  --force                Install even to a path Suricata does not load. Almost
+                         always the wrong answer - read 'check' output first.
   -v, --verbose          More detail.
 
 TYPICAL FIRST RUN
@@ -773,12 +854,14 @@ HELPEOF
 # --- argument parsing ------------------------------------------------------
 
 OPT_RULES_PATH=""
+OPT_FORCE=0
 CMD=""
 ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --confirm)      CONFIRM=1; shift ;;
+        --force)        OPT_FORCE=1; shift ;;
         --rules-path)   OPT_RULES_PATH="${2:-}"; shift 2 ;;
         -v|--verbose)   VERBOSE=1; shift ;;
         -h|--help)      cmd_help; exit 0 ;;
