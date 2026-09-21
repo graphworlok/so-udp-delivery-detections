@@ -84,8 +84,9 @@ a new grid rather than assuming either way.
 | `delivery_class` | `single_packet_udp` | the entry criterion itself. One query returns every delivery of this shape regardless of port, vector or family. |
 | `delivery_kit` | `d431` | the packet-crafting tool. Links deliveries that share a sender implementation across unrelated vectors. |
 | `vector` | `realtek_sdk`, `zyxel_ike`, `ruijie_easydisc`, `udp9999` | the targeted service. |
-| `signature_severity` | `Major`, `Critical` | `Critical` is reserved for composite matches — kit plus payload. |
-| `mitre_technique_id` | `T1190`, `T1105`, `T1059`, `T1222`, `T1027` | standard mapping. |
+| `signature_severity` | `Informational`, `Major`, `Critical` | `Critical` is reserved for composite matches — kit plus command. `Informational` marks reconnaissance. |
+| `worm_stage` | `reconnaissance`, `exploitation`, `delivery`, `ingress_tool_transfer`, `payload_preparation`, `execution`, `evasion` | position on the Mirai-lineage kill chain. See below. |
+| `mitre_technique_id` | `T1595`, `T1190`, `T1105`, `T1059.004`, `T1222.002`, `T1027` | see the worm-chain table below for which rule carries which. |
 
 ## Family attribution does not belong in the rule name
 
@@ -118,22 +119,93 @@ vectors and the upstream vector for those two campaigns is unknown.
 The naming point stands regardless: a rule named for any one tag would have
 been wrong for the other two, against identical binaries.
 
-## Known false-positive class: SID 1000010
+## Measured false-positive class: SID 1000010 is a recon detector
 
-The bare kit fingerprint matches any raw-socket sender using IP ID 54321 with
-DF clear and a zero UDP checksum. That includes amplification-reflection
-scanners, which is not a delivery. Observed 2026-09-20: a source sweeping
-UDP/389, UDP/53 and UDP/3702 (WS-Discovery) tripped `1000010` with a 3-byte
-payload and no downloader verb.
+Three days of live traffic, 143 alerts. **39 of the 53 `1000010` hits were
+internet-wide reconnaissance, not delivery** — and every one carried a
+protocol-*valid* probe for the port it hit:
 
-This is the rule working as designed — 54321 is a common raw-socket constant,
-so a bare hit means "some crafting kit", never a family. The composite
-`1000011` requires a downloader verb as well and correctly did not fire.
+| port | probe |
+|---|---|
+| 53 | DNS query for `Dns-UDP-sCaN-0.iO.INTerNEtdATa.Io` — names itself |
+| 123 | NTP client packet |
+| 161 | SNMP get, community `public` |
+| 389 | CLDAP `objectclass` search |
+| 427 | SLP service request |
+| 443 | full QUIC CHLO, SNI `www.google.com` |
+| 500 / 1194 | IKE / OpenVPN handshake openers |
+| 1434 | MSSQL ping (1 byte) |
+| 1900 | SSDP `M-SEARCH` |
+| 3478 | STUN binding request |
+| 3702 | WS-Discovery, ONVIF `<tds:GetDeviceInformation />` |
+| 5060 / 5061 / 15060 | SIP `OPTIONS`, one with `User-Agent: SIP Scanner` |
+| 5683 | CoAP `.well-known/core` |
+| 12346…13046 | one identical 64-byte probe across a sequential port sweep |
 
-If the scanner noise outweighs the value of catching unknown vectors, narrow
-`1000010` with `dsize:>40` or exclude the well-known amplification ports
-(`53`, `123`, `389`, `1900`, `3702`, `11211`). Do not remove it — catching a
-vector nobody has characterised yet is the entire point of that layer.
+Sources were overwhelmingly scan infrastructure — Hurricane Electric
+(`64.62.197.x`, `74.82.47.x`, `216.218.206.x`, `184.105.247.238`) and AWS
+(`100.29.192.x`).
+
+**Size does not separate them.** The QUIC probe is ~700 bytes and the SIP ones
+~400 — larger than several genuine deliveries, including the 125-byte
+`realtek.selfrep` one-liner. An earlier suggestion in this document to add
+`dsize:>100` was wrong and has been removed.
+
+What separates them is simple: **a delivery carries a command, a probe carries
+a protocol.** That is exactly what `1000011` tests, and it is why `1000011`
+had *zero* false positives over the same period against `1000010`'s 39.
+
+So `1000010` is reclassified rather than tuned. As of rev:2 it is
+`classtype:network-scan`, `signature_severity Informational`, mapped to
+**TA0043 / T1595 (Active Scanning)**, and renamed to say "Recon Or Delivery".
+It stays enabled — it is still the only rule that can see a vector nobody has
+characterised yet — but it is scored as what it actually finds.
+
+### Bidirectional traffic: checked, not a factor
+
+Tested explicitly: no host in `192.168.0.0/16`, `10.0.0.0/8` or
+`172.16.0.0/12` contacted any of these sources in the same three days, so none
+of the hits are replies to internally-initiated traffic. Inbound to the
+internal range in that window was ICMP and TCP only — **zero UDP** — so NAT
+produces no duplicate UDP alerts either.
+
+The exposure was real even though it did not materialise: `1000010` and
+`1000011` had no `flow:to_server`, so a reply from an external server carrying
+the same header fingerprint would have matched. Both carry it as of rev:2.
+
+## Mapping to the documented worm chain
+
+Every rule now carries a `worm_stage` key placing it on the Mirai-lineage kill
+chain these families all follow — scan, exploit, fetch, make executable,
+execute, tidy up:
+
+| stage | SIDs | ATT&CK |
+|---|---|---|
+| `reconnaissance` | `1000010` | TA0043 / T1595 |
+| `exploitation` | `1000020`–`1000023` | TA0001 / T1190 |
+| `delivery` | `1000011` | TA0001 / T1190 + T1105 |
+| `ingress_tool_transfer` | `1000001`–`1000004`, `1000008` | TA0011 / T1105 |
+| `payload_preparation` | `1000005` | TA0005 / T1222.002 |
+| `execution` | `1000006` | TA0002 / T1059.004 |
+| `evasion` | `1000007` | TA0005 / T1027 |
+
+This corrected a real error. The generic downloader rules were tagged
+**TA0001 / T1190 (Exploit Public-Facing Application)**, which conflated
+fetching a payload with exploiting a service. Fetching is **T1105 Ingress Tool
+Transfer** under **TA0011 Command and Control**; only the vector-specific
+rules exploit anything. `chmod` was tagged TA0002 when `T1222.002` is Defense
+Evasion.
+
+```
+rule.metadata.worm_stage:exploitation
+rule.metadata.worm_stage:ingress_tool_transfer
+rule.name:LOCAL* | groupby rule.metadata.worm_stage
+```
+
+A source appearing at several stages from one datagram is the normal case for
+this class — a single geico delivery trips exploitation, delivery, transfer
+and execution at once, because the entire chain is in one packet. That is the
+property that makes it visible to a passive sensor at all.
 
 ## Worked queries
 
