@@ -300,8 +300,33 @@ def main():
         written += 1
 
     print("\n%d written, %d failed." % (written, failed))
-    print("SOC recompiles all-rulesets.rules on its own schedule. Verify with:")
-    print("  so-udp-delivery verify")
+
+    if updates:
+        print("")
+        print("WARNING: updates reach the index but may never be compiled.")
+        print("")
+        print("Measured on SO 3.3.0 on 2026-09-20: a create and an update were")
+        print("written at 23:59:16; SOC recompiled all-rulesets.rules at 00:10:31,")
+        print("eleven minutes later, with the new rev already in Elasticsearch. The")
+        print("created rule was compiled. The updated rule was not - the compiled")
+        print("file still carried the old revision. SOC appears to track its own")
+        print("copy of each detection and only refresh what it believes changed, so")
+        print("an edit made outside SOC goes unnoticed.")
+        print("")
+        print("Check whether yours took:")
+        for rule, _ in updates:
+            print("  grep -c 'sid:%s; rev:%d' /opt/so/rules/suricata/all-rulesets.rules"
+                  % (rule["sid"], rule["rev"]))
+        print("")
+        print("If it reports 0, edit that rule in SOC -> Detections instead.")
+        print("Saving there is what makes SOC notice. Creates do not have this")
+        print("problem, so this tool is reliable for new rules only.")
+
+    if creates:
+        print("")
+        print("Creates compile normally. Verify with:")
+        print("  grep -c 'LOCAL IOT-DELIVERY' /opt/so/rules/suricata/all-rulesets.rules")
+
     return 1 if failed else 0
 
 

@@ -293,6 +293,35 @@ sudo python3 tools/push-soc.py rules/suricata/udp-delivery.rules     --sid 10000
 sudo ./bin/so-udp-delivery verify
 ```
 
+### Measured result: creates compile, updates do not
+
+Tested on SO 3.3.0, 2026-09-20. A create (`1000008`) and an update
+(`1000005` rev:1 -> rev:2) were written to `so-detection` at 23:59:16. SOC
+recompiled `all-rulesets.rules` at 00:10:31 — eleven minutes later, with both
+changes already in Elasticsearch. Result:
+
+| change | in `so-detection` | in `all-rulesets.rules` |
+|---|---|---|
+| create `1000008` rev:2 | yes | **yes** |
+| update `1000005` to rev:2 | yes | **no** — still rev:1 |
+
+Not a race: the compile ran well after both writes. SOC appears to keep its
+own copy of each detection and refresh only what it believes changed. A new
+document is unavoidably new so it gets compiled; an edited one is not noticed,
+because as far as SOC is concerned nothing changed.
+
+**So this tool is reliable for creating rules and unreliable for changing
+them.** For a rev bump, edit the rule in SOC → Detections — saving there is
+what makes SOC notice. Always verify:
+
+```bash
+grep -c 'sid:<SID>; rev:<N>' /opt/so/rules/suricata/all-rulesets.rules
+```
+
+Untested: whether `so-soc-restart` forces a full re-read and picks up external
+updates. It plausibly would, but restarting SOC on a production grid to work
+around this is a worse trade than clicking Save.
+
 It is deliberately **not** wired into `bin/so-udp-delivery`. Everything the
 CLI does is either read-only or reversible from a backup; this is neither, so
 it stays a separate deliberate invocation rather than one subcommand among
