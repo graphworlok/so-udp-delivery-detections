@@ -264,6 +264,16 @@ def main():
         else:
             unchanged.append((rule, existing))
 
+    # A rule whose text changed but whose rev did not is a mistake, not an
+    # update: Suricata and SOC identify versions by rev, so two different
+    # texts under one sid+rev are indistinguishable downstream. Refuse them.
+    stale = []
+    for rule, existing in list(updates):
+        old_rev = rev_of(get_field(existing["_source"], "content"))
+        if old_rev.isdigit() and rule["rev"] <= int(old_rev):
+            stale.append((rule, int(old_rev)))
+            updates.remove((rule, existing))
+
     for rule, _ in creates:
         print("  CREATE  %s  rev:%d  %s" % (rule["sid"], rule["rev"], rule["title"]))
     for rule, existing in updates:
@@ -271,12 +281,21 @@ def main():
             "UPDATE " if args.in_place else "REPLACE",
             rule["sid"], rev_of(get_field(existing["_source"], "content")),
             rule["rev"], rule["title"]))
+    for rule, old_rev in stale:
+        print("  REFUSED %s  text changed but rev:%d is not above rev:%d"
+              % (rule["sid"], rule["rev"], old_rev))
     for rule, _ in unchanged:
         print("  same    %s  rev:%d" % (rule["sid"], rule["rev"]))
 
+    if stale:
+        print("\n%d rule(s) refused: their text differs from what SOC holds but"
+              % len(stale))
+        print("their revision was not bumped. Increment rev: on each and re-run.")
+
     if not (creates or updates):
-        print("\nnothing to do - SOC already holds every rule as written")
-        return 0
+        print("\nnothing to do - SOC already holds every rule as written"
+              if not stale else "\nnothing else to do.")
+        return 1 if stale else 0
 
     if not args.confirm:
         print("\nDRY RUN - nothing was written. Re-run with --confirm to apply.")

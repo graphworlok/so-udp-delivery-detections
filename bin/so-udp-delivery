@@ -547,10 +547,17 @@ for path in sys.argv[3:]:
             alert = doc.get("alert") or {}
             sid, sig = alert.get("signature_id"), str(alert.get("signature", ""))
             if sid and sig.startswith("LOCAL IOT-DELIVERY"):
-                # The test run shifted SIDs to avoid colliding with the
-                # deployed copies; report them under their real numbers.
-                if sid > offset:
-                    sid -= offset
+                # The rules under test were shifted up by `offset`. The
+                # deployed originals are in the copied ruleset too and fire
+                # alongside them; they are the live version, not what is being
+                # tested, so report only the shifted band, mapped back.
+                #
+                # An earlier version un-shifted anything above `offset`, which
+                # is every SID - so deployed rule 1000001 was reported as
+                # "900001" and the check passed for the wrong reason.
+                if not (1000000 + offset <= sid <= 1999999):
+                    continue
+                sid -= offset
                 hits[sid] += 1
                 names[sid] = sig
 
