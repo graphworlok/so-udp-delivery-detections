@@ -27,6 +27,8 @@ CORPUS = os.path.join(HERE, "corpus.tsv")
 # Mirrors the pcre in SID 1000008 rev:2. Both the dropper form
 # "echo|nc <ip> <port> > a$$" and the wire form "&nc <ip> <port>|sh"
 # have to match; rev:1 anchored on "|nc" and missed the wire form.
+KIT_CMD_RE = r"(wget|tftp|curl|busybox|[^a-z]nc |chmod)"
+
 NC_RE = r"(^|[\s;&|`(])nc\s+(-\w+\s+)*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\s+\d{2,5}\b"
 
 
@@ -76,6 +78,9 @@ RULES = [
     (1000008, "Netcat Fetch", None,
      lambda p: "nc " in p.lower() and bool(
          re.search(NC_RE, p, re.I))),
+
+    (1000011, "Kit + Command (composite)", None,
+     lambda p: bool(re.search(KIT_CMD_RE, p, re.I))),
 
     (1000006, "Fetch Piped To Shell", None,
      lambda p: content_within(p, "http", "|sh", 256)),

