@@ -12,19 +12,36 @@ WHY IT IS SHAPED THIS WAY
     It deliberately copies what Security Onion's own
     /usr/sbin/so-detections-overrides-import does: read basic-auth creds from
     /opt/so/conf/elasticsearch/curl.config, talk to https://localhost:9200,
-    find a detection by publicId+engine with _search, change it with _update.
-    The fields written on create were read back from a detection SOC itself
-    created through the UI, field for field, rather than inferred.
+    find a detection by publicId+engine with _search. The fields written on
+    create were read back from a detection SOC itself created through the UI,
+    field for field, rather than inferred.
 
     That makes this consistent with how SO operates. It is still NOT a
     supported interface.
 
+WHY UPDATES REPLACE RATHER THAN EDIT
+    Measured on SO 3.3.0, 2026-09-20: a create and an in-place _update were
+    written at 23:59:16. SOC recompiled all-rulesets.rules at 00:10:31, with
+    both already in Elasticsearch. The created rule was compiled; the edited
+    one was not, and the compiled file kept the old revision. SOC evidently
+    keeps its own copy of each detection and refreshes only what it believes
+    changed, so an edit made outside SOC goes unnoticed.
+
+    Creates are noticed, unavoidably, because the document is new. So an
+    update here is a delete followed by a create under a fresh document id.
+    createTime, userId, author, isEnabled and any overrides attached to the
+    original are carried across. `--in-place` restores the old behaviour for
+    comparison; it is not expected to compile.
+
+    The cost is a brief window where the rule does not exist, and the failure
+    mode if the create fails after the delete - in which case the tool prints
+    the rule text to paste into the UI.
+
 RISKS, PLAINLY
     - It bypasses the validation SOC runs when you save a rule in the UI.
       Validate with `so-udp-delivery test` first. That is not optional.
-    - SOC's caching behaviour for externally inserted documents is not
-      something this repo has tested. The overrides tool implies SOC re-reads
-      the index, but that is inference for *creation*.
+    - Replacing changes the document id. Anything holding a reference to the
+      old id will not follow.
     - The schema belongs to SOC and can change on upgrade.
 
     Use the UI for a first install. This earns its keep on rev bumps and
@@ -128,6 +145,14 @@ def source_is_nested(source):
     return isinstance(source.get("so_detection"), dict)
 
 
+def set_field(doc, name, value, nested):
+    """Set so_detection.<name> in whichever shape the document uses."""
+    if nested:
+        doc.setdefault("so_detection", {})[name] = value
+    else:
+        doc["so_detection.%s" % name] = value
+
+
 def find_detection(session, public_id):
     query = {
         "query": {"bool": {"filter": [
@@ -207,6 +232,10 @@ def main():
     ap.add_argument("--confirm", action="store_true",
                     help="actually write. Without it nothing is sent.")
     ap.add_argument("--author", default=os.environ.get("SUDO_USER") or "unknown")
+    ap.add_argument("--in-place", action="store_true",
+                    help="update existing detections with _update instead of "
+                         "replacing them. Measured not to recompile on SO "
+                         "3.3.0; kept for comparison only.")
     ap.add_argument("--auth-file", default=AUTH_FILE)
     args = ap.parse_args()
 
@@ -238,7 +267,8 @@ def main():
     for rule, _ in creates:
         print("  CREATE  %s  rev:%d  %s" % (rule["sid"], rule["rev"], rule["title"]))
     for rule, existing in updates:
-        print("  UPDATE  %s  rev:%s -> %d  %s" % (
+        print("  %s  %s  rev:%s -> %d  %s" % (
+            "UPDATE " if args.in_place else "REPLACE",
             rule["sid"], rev_of(get_field(existing["_source"], "content")),
             rule["rev"], rule["title"]))
     for rule, _ in unchanged:
@@ -282,45 +312,89 @@ def main():
         written += 1
 
     for rule, existing in updates:
-        body = {"doc": {
-            "so_detection.content": rule["content"],
-            "so_detection.title": rule["title"],
-            "so_detection.severity": rule["severity"],
-            "@timestamp": now,
-        }}
-        r = session.post("%s/%s/_update/%s?refresh=true"
-                         % (ES_URL, existing["_index"], existing["_id"]),
-                         json=body)
+        src = existing["_source"]
+
+        if args.in_place:
+            # Kept for comparison only. Measured on SO 3.3.0: the new content
+            # lands in the index and SOC never compiles it.
+            body = {"doc": {
+                "so_detection.content": rule["content"],
+                "so_detection.title": rule["title"],
+                "so_detection.severity": rule["severity"],
+                "@timestamp": now,
+            }}
+            r = session.post("%s/%s/_update/%s?refresh=true"
+                             % (ES_URL, existing["_index"], existing["_id"]),
+                             json=body)
+            if r.status_code >= 300:
+                sys.stderr.write("update %s failed: %s %s\n"
+                                 % (rule["sid"], r.status_code, r.text[:200]))
+                failed += 1
+                continue
+            print("  updated %s in place (SOC may not compile this)" % rule["sid"])
+            written += 1
+            continue
+
+        # Replace: delete the document and write a new one. SOC compiles
+        # creates but not in-place edits, so to SOC this has to look like a
+        # new detection. Everything worth keeping is carried across first.
+        keep_created = get_field(src, "createTime") or now
+        keep_user = get_field(src, "userId") or user_id
+        keep_author = get_field(src, "author") or args.author
+        keep_overrides = get_field(src, "overrides") or []
+        keep_enabled = get_field(src, "isEnabled")
+        if keep_enabled is None:
+            keep_enabled = True
+
+        if keep_overrides:
+            print("  carrying %d override(s) across on %s"
+                  % (len(keep_overrides), rule["sid"]))
+
+        r = session.delete("%s/%s/_doc/%s?refresh=true"
+                           % (ES_URL, existing["_index"], existing["_id"]))
         if r.status_code >= 300:
-            sys.stderr.write("update %s failed: %s %s\n"
+            sys.stderr.write("delete %s failed, nothing changed: %s %s\n"
                              % (rule["sid"], r.status_code, r.text[:200]))
             failed += 1
             continue
-        print("  updated %s" % rule["sid"])
+
+        doc = build_doc(rule, keep_author, keep_user, now, nested=nested_shape)
+        set_field(doc, "createTime", keep_created, nested_shape)
+        set_field(doc, "overrides", keep_overrides, nested_shape)
+        set_field(doc, "isEnabled", keep_enabled, nested_shape)
+
+        doc_id = str(uuid.uuid4())
+        r = session.put("%s/%s/_doc/%s?refresh=true" % (ES_URL, INDEX, doc_id),
+                        json=doc)
+        if r.status_code >= 300:
+            # The old document is already gone. Say so loudly and hand back
+            # the rule text so it can be pasted into the UI.
+            sys.stderr.write(
+                "\n*** %s WAS DELETED AND THE REPLACEMENT FAILED ***\n"
+                "%s %s\n"
+                "Paste this into SOC -> Detections -> New Detection:\n\n%s\n\n"
+                % (rule["sid"], r.status_code, r.text[:200], rule["content"]))
+            failed += 1
+            continue
+        print("  replaced %s as %s (was %s)"
+              % (rule["sid"], doc_id, existing["_id"]))
         written += 1
 
     print("\n%d written, %d failed." % (written, failed))
 
-    if updates:
+    if updates and args.in_place:
         print("")
-        print("WARNING: updates reach the index but may never be compiled.")
+        print("WARNING: --in-place updates reach the index but are not compiled.")
+        print("Measured on SO 3.3.0: SOC compiled a created rule and ignored an")
+        print("edited one eleven minutes later, with the new revision already in")
+        print("Elasticsearch. Drop --in-place to replace instead.")
+    elif updates:
         print("")
-        print("Measured on SO 3.3.0 on 2026-09-20: a create and an update were")
-        print("written at 23:59:16; SOC recompiled all-rulesets.rules at 00:10:31,")
-        print("eleven minutes later, with the new rev already in Elasticsearch. The")
-        print("created rule was compiled. The updated rule was not - the compiled")
-        print("file still carried the old revision. SOC appears to track its own")
-        print("copy of each detection and only refresh what it believes changed, so")
-        print("an edit made outside SOC goes unnoticed.")
-        print("")
-        print("Check whether yours took:")
+        print("Replaced rules were deleted and rewritten under a new document id,")
+        print("so SOC sees them as new. Confirm each one compiled:")
         for rule, _ in updates:
             print("  grep -c 'sid:%s; rev:%d' /opt/so/rules/suricata/all-rulesets.rules"
                   % (rule["sid"], rule["rev"]))
-        print("")
-        print("If it reports 0, edit that rule in SOC -> Detections instead.")
-        print("Saving there is what makes SOC notice. Creates do not have this")
-        print("problem, so this tool is reliable for new rules only.")
 
     if creates:
         print("")

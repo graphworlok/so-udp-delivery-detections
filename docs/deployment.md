@@ -310,9 +310,18 @@ own copy of each detection and refresh only what it believes changed. A new
 document is unavoidably new so it gets compiled; an edited one is not noticed,
 because as far as SOC is concerned nothing changed.
 
-**So this tool is reliable for creating rules and unreliable for changing
-them.** For a rev bump, edit the rule in SOC → Detections — saving there is
-what makes SOC notice. Always verify:
+**Creates are noticed; in-place edits are not.** A create is unavoidably new,
+so SOC compiles it. So `push-soc` performs an update as a **delete followed by
+a create under a fresh document id**, which is the only shape SOC reliably
+honours. `createTime`, `userId`, `author`, `isEnabled` and any attached
+overrides are carried across from the original.
+
+The costs are honest ones: the document id changes, there is a brief window
+where the rule does not exist, and if the create fails after the delete the
+tool prints the rule text to paste into the UI. `--in-place` restores the old
+`_update` behaviour for comparison; it is not expected to compile.
+
+Always verify:
 
 ```bash
 grep -c 'sid:<SID>; rev:<N>' /opt/so/rules/suricata/all-rulesets.rules
