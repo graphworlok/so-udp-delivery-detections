@@ -93,6 +93,23 @@ def make_session(auth_file):
     raise RuntimeError("no 'user =' line in %s" % auth_file)
 
 
+# How SOC maps a rule's metadata signature_severity onto its own severity,
+# as observed on SO 3.3.0: Critical and Major from detections created through
+# the UI, Minor from ETOPEN community rules. Informational is not observed;
+# it is mapped with Minor as the nearest documented neighbour.
+SEVERITY_MAP = {
+    "Critical": "critical",
+    "Major": "high",
+    "Minor": "low",
+    "Informational": "low",
+}
+
+
+def soc_severity(line):
+    m = re.search(r"signature_severity (\w+)", line)
+    return SEVERITY_MAP.get(m.group(1), "high") if m else "high"
+
+
 def parse_rules(path):
     """Yield a dict per alert rule in a .rules file."""
     out = []
@@ -113,9 +130,7 @@ def parse_rules(path):
                 "title": msg.group(1),
                 "rev": int(rev.group(1)) if rev else 1,
                 "content": line,
-                # SOC derived severity from the metadata signature_severity.
-                "severity": ("critical" if "signature_severity Critical" in line
-                             else "high"),
+                "severity": soc_severity(line),
                 "sourceCreated": ("%s-%s-%sT00:00:00Z" % created.groups()
                                   if created else None),
             })
@@ -143,6 +158,18 @@ def get_field(source, name):
 
 def source_is_nested(source):
     return isinstance(source.get("so_detection"), dict)
+
+
+def partial_doc(fields, nested):
+    """A partial-update body in the document's own shape.
+
+    Sending {"so_detection.severity": x} to a document stored as
+    {"so_detection": {"severity": ...}} does not change the nested field - it
+    adds a second, flat key that maps to the same field, leaving two values.
+    """
+    if nested:
+        return {"so_detection": dict(fields)}
+    return {"so_detection.%s" % k: v for k, v in fields.items()}
 
 
 def set_field(doc, name, value, nested):
@@ -254,13 +281,18 @@ def main():
     session = make_session(args.auth_file)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f000Z")
 
-    creates, updates, unchanged = [], [], []
+    creates, updates, unchanged, relabel = [], [], [], []
     for rule in rules:
         existing = find_detection(session, rule["sid"])
         if existing is None:
             creates.append((rule, None))
         elif get_field(existing["_source"], "content") != rule["content"]:
             updates.append((rule, existing))
+        elif get_field(existing["_source"], "severity") != rule["severity"]:
+            # Rule text is identical; only SOC's own severity label drifted.
+            # That label is never compiled into Suricata, so an in-place
+            # _update is safe here and no revision bump is needed.
+            relabel.append((rule, existing))
         else:
             unchanged.append((rule, existing))
 
@@ -284,6 +316,10 @@ def main():
     for rule, old_rev in stale:
         print("  REFUSED %s  text changed but rev:%d is not above rev:%d"
               % (rule["sid"], rule["rev"], old_rev))
+    for rule, existing in relabel:
+        print("  RELABEL %s  severity %s -> %s (text unchanged)"
+              % (rule["sid"], get_field(existing["_source"], "severity"),
+                 rule["severity"]))
     for rule, _ in unchanged:
         print("  same    %s  rev:%d" % (rule["sid"], rule["rev"]))
 
@@ -292,7 +328,7 @@ def main():
               % len(stale))
         print("their revision was not bumped. Increment rev: on each and re-run.")
 
-    if not (creates or updates):
+    if not (creates or updates or relabel):
         print("\nnothing to do - SOC already holds every rule as written"
               if not stale else "\nnothing else to do.")
         return 1 if stale else 0
@@ -301,6 +337,25 @@ def main():
         print("\nDRY RUN - nothing was written. Re-run with --confirm to apply.")
         print("Validate first if you have not:  sudo so-udp-delivery test")
         return 0
+
+    relabelled = 0
+    for rule, existing in relabel:
+        r = session.post("%s/%s/_update/%s?refresh=true"
+                         % (ES_URL, existing["_index"], existing["_id"]),
+                         json={"doc": partial_doc(
+                             {"severity": rule["severity"]},
+                             source_is_nested(existing["_source"]))})
+        if r.status_code >= 300:
+            sys.stderr.write("relabel %s failed: %s %s\n"
+                             % (rule["sid"], r.status_code, r.text[:200]))
+            continue
+        print("  relabelled %s severity -> %s" % (rule["sid"], rule["severity"]))
+        relabelled += 1
+    if relabel and not (creates or updates):
+        print("\n%d relabelled. Severity is a SOC-side label and is not compiled"
+              % relabelled)
+        print("into Suricata, so no recompile is needed or expected.")
+        return 0 if relabelled == len(relabel) else 1
 
     # Write new documents in whatever shape the index already holds, rather
     # than assuming. Any existing detection answers the question.
@@ -336,12 +391,11 @@ def main():
         if args.in_place:
             # Kept for comparison only. Measured on SO 3.3.0: the new content
             # lands in the index and SOC never compiles it.
-            body = {"doc": {
-                "so_detection.content": rule["content"],
-                "so_detection.title": rule["title"],
-                "so_detection.severity": rule["severity"],
-                "@timestamp": now,
-            }}
+            body = {"doc": partial_doc(
+                {"content": rule["content"], "title": rule["title"],
+                 "severity": rule["severity"]},
+                source_is_nested(src))}
+            body["doc"]["@timestamp"] = now
             r = session.post("%s/%s/_update/%s?refresh=true"
                              % (ES_URL, existing["_index"], existing["_id"]),
                              json=body)
