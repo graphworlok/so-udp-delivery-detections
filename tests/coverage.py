@@ -29,6 +29,14 @@ CORPUS = os.path.join(HERE, "corpus.tsv")
 # have to match; rev:1 anchored on "|nc" and missed the wire form.
 KIT_CMD_RE = r"(wget|tftp|curl|busybox|[^a-z]nc |chmod)"
 
+# Mirrors the pcre in SID 1000009: a public IPv4 used as a fetch destination,
+# either IP[:port]/path or IP <space> port. Private, loopback, link-local,
+# CGNAT, multicast/reserved and the WAN address itself are excluded.
+IP_DEST_RE = (r"(?<![\d.])(?!(?:0|10|127)\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\."
+              r"|192\.168\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\."
+              r"|(?:22[4-9]|2[3-5]\d)\.|14\.203\.163\.145(?!\d))"
+              r"(?:\d{1,3}\.){3}\d{1,3}(?:(?::\d{1,5})?/[^\s/]|\s+\d{2,5}\b)")
+
 NC_RE = r"(^|[\s;&|`(])nc\s+(-\w+\s+)*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\s+\d{2,5}\b"
 
 
@@ -81,6 +89,9 @@ RULES = [
 
     (1000011, "Kit + Command (composite)", None,
      lambda p: bool(re.search(KIT_CMD_RE, p, re.I))),
+
+    (1000009, "Embeds Public IPv4 Destination", None,
+     lambda p: bool(re.search(IP_DEST_RE, p))),
 
     (1000006, "Fetch Piped To Shell", None,
      lambda p: content_within(p, "http", "|sh", 256)),
